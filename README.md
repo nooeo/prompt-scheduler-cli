@@ -1,200 +1,75 @@
 # 🚀 Prompt Scheduler
 
-> **Version 1.0.2** - Modern TypeScript automation tool for scheduling and executing prompts for AI agents with intelligent usage limit detection. Currently supports Claude Code.
+> 基于 tmux 的 Claude Code 自动化调度器，支持完成标记、结果抽取与后处理 hook。
 
 **[📖 日本語版 README](README.ja.md)**
 
-## ✨ Features
+## 🎯 工作流理念（P1–P6）
 
-- **🎯 Smart Automation**: Sequential prompt execution with customizable wait times
-- **⏱️ Usage Limit Detection**: Automatically detects and waits for AI agent usage limit resets
-- **📊 Status Tracking**: Real-time progress monitoring with timestamps
-- **🎨 Modern UI**: Colorful, emoji-rich terminal interface
-- **🖥️ Tmux Integration**: Direct tmux session control for seamless workflow
-- **🔄 Skip Logic**: Automatically skips already sent prompts
-- **🏁 Completion Markers**: Injects task-finish markers and extracts per-task output
-- **🧩 Post-Process Hooks**: Pipe task output into a custom command to generate new prompts
-- **⏰ Time Control**: Stop execution at specific times or after duration limits
+- **P1（人工目标/计划）价值最高**：你负责目标设定与关键评审。
+- **P2–P6（执行与微调）交给 AI**：让模型基于输出自动迭代。
+- **避免“AI 陪聊”**：减少手工微调，把时间用在高价值决策上。
 
-## 🛠️ Installation
+本项目的改造点正是为了让 **Claude Code 输出 → 另一模型生成新指令 → 再回到 Claude Code** 形成闭环。
 
-### Quick Install (Recommended)
+## ✨ 主要功能
+
+- **🖥️ tmux 控制**：直接向指定 session/pane 发送提示词
+- **🏁 完成标记**：自动注入 `[PS_TASK_END:xxx]` 完成信号
+- **📤 结果抽取**：从 tmux 历史中截取“本任务输出”
+- **🧩 后处理 hook**：把输出交给外部模型生成下一条指令
+- **🔄 跳过已发送**：自动忽略已完成任务
+- **⏱️ 使用限额处理**：识别限额提示并自动等待
+- **⏰ 时间控制**：按时间点或时长停止
+
+## 🛠️ 安装
+
+### 快速安装
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/prompt-scheduler/cli/main/install.sh | bash
 ```
 
-### Upgrade to Latest Version
-
-To upgrade to the latest version, simply run the same installation command:
+### 手动安装
 
 ```bash
-# Upgrade to latest version (same command as installation)
-curl -fsSL https://raw.githubusercontent.com/prompt-scheduler/cli/main/install.sh | bash
-```
-
-The installer will automatically detect and upgrade your existing installation.
-
-### Manual Installation
-
-```bash
-# Clone the repository
 git clone https://github.com/prompt-scheduler/cli.git
 cd cli
-
-# Install dependencies
 npm install
-
-# Set up your prompts configuration
 cp prompts/prompts.jsonl.sample prompts/prompts.jsonl
-# Edit prompts/prompts.jsonl with your actual tmux session paths and prompts
 ```
 
-### Requirements
+## 🚀 快速开始
 
-- **Node.js 16+** and npm
-- **tmux** (for automation)
-- **git** (for installation)
-
-## 🎨 Usage
-
-### Quick Commands (via npm scripts)
+1) 找到 tmux pane：
 ```bash
-npm run run      # Execute all unsent prompts
-npm run next     # Execute next unsent prompt
-npm run status   # Show prompt status
-npm run reset    # Reset all prompts to unsent
-npm run help     # Show help
+tmux list-panes -t ai-worker
 ```
+比如返回 `0: ... %0`，则推荐用 `ai-worker:0.0`。
 
-![Help Command](assets/npm_run_help.png)
-
-### Status Monitoring
-Track your prompt execution progress with detailed status information:
-
-![Status Command](assets/npm_run_status.png)
-
-### Advanced Options
-```bash
-# Stop execution at specific time
-tsx src/claude-schedule.ts run --stop-at 5pm
-tsx src/claude-schedule.ts run --stop-at 17:30
-
-# Run for specific duration
-tsx src/claude-schedule.ts run --hours 3
-tsx src/claude-schedule.ts run --hours 2.5
-
-# Use custom prompt file
-tsx src/claude-schedule.ts run --prompt-file ~/my-prompts.jsonl
-tsx src/claude-schedule.ts status --prompt-file ~/custom/prompts.jsonl
-
-# Use sequential execution mode (direct prompt sending)
-tsx src/claude-schedule.ts run --mode sequential
-
-# Ignore "Approaching usage limit" messages
-tsx src/claude-schedule.ts run --ignore-approaching-limit
-
-# Enable completion markers and wait for task end signal
-tsx src/claude-schedule.ts run --task-marker --wait-for-marker --capture-lines 2000
-
-# Run a post-process hook with {prompt, output, taskIndex} JSON
-tsx src/claude-schedule.ts run --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
-```
-
-### Direct TypeScript Execution
-```bash
-tsx src/claude-schedule.ts run     # Start automation
-tsx src/claude-schedule.ts status  # Check progress  
-tsx src/claude-schedule.ts next    # Execute one prompt
-tsx src/claude-schedule.ts 3       # Execute prompt #3
-
-# With custom options
-tsx src/claude-schedule.ts run --prompt-file ~/my-prompts.jsonl --mode sequential --ignore-approaching-limit
-```
-
-## 📋 Commands
-
-| Command | Description |
-|---------|-------------|
-| `run` | Execute all unsent prompts sequentially with auto-wait |
-| `run --stop-at TIME` | Execute prompts until specific time (e.g., 5pm, 17:30) |
-| `run --hours N` | Execute prompts for N hours |
-| `run --prompt-file PATH` | Use custom prompt file instead of default |
-| `run --mode MODE` | Set execution mode: `repeat` (default) or `sequential` |
-| `run --clear-input MODE` | Clear input before sending (`none`, `escape`, `ctrl-c`) |
-| `run --ignore-approaching-limit` | Ignore "Approaching usage limit" messages |
-| `run --task-marker [PREFIX]` | Inject completion marker wrapper (default prefix: `PS_TASK_END`) |
-| `run --wait-for-marker` | Wait for completion marker before continuing |
-| `run --post-process-cmd CMD` | Run hook with `{prompt, output, taskIndex}` JSON on stdin |
-| `run --capture-lines N` | Capture last N tmux history lines for output extraction |
-| `run --marker-poll-ms N` | Poll interval for marker detection |
-| `run --marker-timeout-ms N` | Timeout for marker waiting |
-| `next` | Execute only the next unsent prompt |
-| `status` | Show status of all prompts with timestamps |
-| `reset` | Reset all prompts to unsent status |
-| `help` | Show help message |
-| `[1-n]` | Execute specific prompt by index |
-
-## 📁 Configuration
-
-### Default Configuration
-
-Copy `prompts/prompts.jsonl.sample` to `prompts/prompts.jsonl` and edit it to configure your automation tasks. Each line represents a prompt configuration:
-
-### Custom Prompt Files
-
-You can use custom prompt files with the `--prompt-file` option:
-
-```bash
-# Create a custom prompt file
-cp prompts/prompts.jsonl.sample ~/my-project-prompts.jsonl
-
-# Use it with any command
-tsx src/claude-schedule.ts run --prompt-file ~/my-project-prompts.jsonl
-tsx src/claude-schedule.ts status --prompt-file ~/my-project-prompts.jsonl
-```
-
+2) 编辑 `prompts/prompts.jsonl`：
 ```jsonl
-{"prompt": "Create a responsive login form with validation", "tmux_session": "/path/to/your/claude/session", "sent": "false", "sent_timestamp": null, "default_wait": "15m"}
-{"prompt": "Add error handling to the login form", "tmux_session": "/path/to/your/claude/session", "sent": "false", "sent_timestamp": null, "default_wait": "10m"}
-{"prompt": "Style the form with modern CSS and animations", "tmux_session": "/path/to/your/claude/session", "sent": "false", "sent_timestamp": null, "default_wait": "5m"}
+{"prompt":"帮我写一个 flapy bird 的html 网页","tmux_session":"ai-worker:0.0","sent":false,"sent_timestamp":null,"default_wait":"0m"}
 ```
 
-### Configuration Fields
-
-- `prompt`: The prompt text to send to the AI agent
-- `tmux_session`: Target tmux session path
-- `sent`: "true" or "false" execution status
-- `sent_timestamp`: Execution timestamp (auto-managed)
-- `default_wait`: Wait time after execution ("15m", "1h", "30s", etc.)
-
-## 🔧 Technical Details
-
-- **Language**: TypeScript with modern ES modules
-- **Runtime**: Node.js with tsx for direct execution
-- **Dependencies**: chalk (colors), dayjs (time), tmux (automation)
-- **Architecture**: Functional programming with strong typing
-
-### Execution Modes
-
-The scheduler supports two execution modes:
-
-- **`repeat` (default)**: Uses tmux command history (Up arrow key) to repeat previous prompts, then overwrites with new content. This mode relies on tmux session history.
-- **`sequential`**: Directly sends prompts without using tmux history. This mode is more straightforward and doesn't depend on previous command history.
-
-`--clear-input` defaults to `none` to avoid triggering Claude Code Rewind. If you need the old behavior, set `--clear-input escape`.
-
+3) 运行（推荐 sequential）：
 ```bash
-# Use repeat mode (default - uses tmux history)
-tsx src/claude-schedule.ts run
-
-# Use sequential mode (direct prompt sending)
-tsx src/claude-schedule.ts run --mode sequential
+npm run run -- --mode sequential --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
 ```
 
-## 🧩 Completion Markers & Hooks
+> 若 Claude Code 进入 Rewind 画面，请按 `Esc` 退出。
 
-When `--task-marker` is enabled, the scheduler wraps each prompt with a completion instruction like:
+## 📄 prompts.jsonl 字段
+
+- `prompt`：要发送的提示词
+- `tmux_session`：目标 tmux session/pane（如 `ai-worker:0.0`）
+- `sent`：是否已发送（支持 `"true"/"false"` 或 `true/false`）
+- `sent_timestamp`：发送时间戳（可为空）
+- `default_wait`：每个任务后等待时长（默认 `0m`）
+
+## 🧩 完成标记 & 输出抽取
+
+启用 `--task-marker` 后，Scheduler 会自动包一层指令：
 
 ```
 执行任务：<your prompt>
@@ -202,94 +77,86 @@ When `--task-marker` is enabled, the scheduler wraps each prompt with a completi
 完成后请只输出一行：[PS_TASK_END:YYMMDDHHmmss-003]
 ```
 
-With `--wait-for-marker`, the scheduler polls tmux history (`capture-pane -S -N`) until the marker appears, then extracts only the output for that task. If `--post-process-cmd` is provided, the scheduler sends JSON to stdin:
+`--wait-for-marker` 会轮询 tmux 历史（`capture-pane -S -N`）直到看到 marker，然后抽取该 marker 之前的输出作为本任务结果。
+
+相关参数：
+- `--capture-lines N`：历史行数（默认 2000）
+- `--marker-poll-ms N`：轮询间隔
+- `--marker-timeout-ms N`：超时退出
+
+## 🔌 后处理 hook（核心闭环）
+
+`--post-process-cmd` 会把 `{prompt, output, taskIndex}` JSON 写入 stdin：
 
 ```json
 {"prompt":"...","output":"...","taskIndex":3}
 ```
 
-The hook can return either plain text (treated as a single new prompt) or JSONL lines (each line a prompt object). Missing fields are filled with the current prompt's `tmux_session` and `default_wait`, and new prompts are appended to the prompt file.
-`--post-process-cmd` automatically enables marker waiting even if `--wait-for-marker` is not specified.
-Use `--capture-lines` to adjust how much tmux history is scanned (default: 2000).
+Hook 可以输出：
+- **纯文本**：作为一条新 prompt 追加
+- **JSONL**：每行一个 prompt 对象（缺失字段会补默认）
 
-### Gemini Reviewer Example
+> 只要设置了 `--post-process-cmd`，就会自动等待 marker（无需额外 `--wait-for-marker`）。
 
-The included `scripts/reviewer.cjs` posts the Claude Code output to a Gemini-compatible endpoint and returns the next instruction.
+## 🤖 Gemini Reviewer 示例
+
+内置脚本：`scripts/reviewer.cjs`，会把 Claude Code 的输出发给 `gemini-3-pro`。
 
 ```bash
 export PS_REVIEWER_API_KEY="your-api-key"
 export PS_REVIEWER_API_URL="http://175.178.33.108:3001"
 export PS_REVIEWER_MODEL="gemini-3-pro"
-tsx src/claude-schedule.ts run --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
+
+npm run run -- --mode sequential --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
 ```
 
-## 💡 Usage Limit Handling
-
-The scheduler automatically detects Claude usage limit message formats:
-
-1. **"Approaching usage limit · resets at 10pm"**
-2. **"Claude usage limit reached. Your limit will reset at 1pm"**
-
-When detected during loop execution, the scheduler:
-
-1. Captures tmux pane content
-2. Parses reset time using regex
-3. Calculates wait duration with dayjs
-4. Sleeps until reset time
-5. Continues execution automatically
-
-![Usage Limit Handling](assets/npm_run_run_with_usage_limit_dealing.png)
-
-### Ignoring Approaching Limit Messages
-
-By default, the scheduler stops for both "approaching" and "reached" limit messages. You can ignore "approaching" messages and only stop for "reached" messages:
+## 🧰 常用命令
 
 ```bash
-tsx src/claude-schedule.ts run --ignore-approaching-limit
+npm run run      # 执行所有未发送任务
+npm run next     # 执行下一条任务
+npm run status   # 查看状态
+npm run reset    # 重置 sent 状态
+npm run help     # 帮助
 ```
 
-This allows the scheduler to continue running even when approaching the usage limit, only stopping when the limit is actually reached.
+## 📋 参数速查
 
-**Note**: Usage limit detection is skipped for initial/single executions to avoid false positives from existing messages.
+| 参数 | 说明 |
+|---|---|
+| `--mode sequential` | 推荐模式，不依赖历史命令 |
+| `--clear-input MODE` | 清空输入：`none`/`escape`/`ctrl-c`（默认 none，避免触发 Rewind） |
+| `--task-marker [PREFIX]` | 注入完成标记（默认 `PS_TASK_END`） |
+| `--wait-for-marker` | 等待完成标记 |
+| `--post-process-cmd CMD` | 调用 hook（stdin JSON） |
+| `--capture-lines N` | tmux 历史行数 |
+| `--marker-poll-ms N` | 轮询间隔 |
+| `--marker-timeout-ms N` | 等待超时 |
+| `--stop-at TIME` | 到时间停止 |
+| `--hours N` | 运行时长 |
 
-## ⏰ Time Control Features
+## ⏱️ 使用限额处理
 
-### Stop at Specific Time
+当 Claude Code 出现以下消息时自动等待：
+- `Approaching usage limit · resets at 10pm`
+- `Claude usage limit reached. Your limit will reset at 1pm`
+
+可用 `--ignore-approaching-limit` 忽略“接近限额”的提示。
+
+## ⏰ 时间控制
+
 ```bash
-# Stop at 5 PM today (or 5 PM tomorrow if it's already past 5 PM)
-tsx src/claude-schedule.ts run --stop-at 5pm
-
-# Stop at 17:30 (24-hour format)
-tsx src/claude-schedule.ts run --stop-at 17:30
+npm run run -- --stop-at 17:30
+npm run run -- --hours 3
 ```
 
-### Run for Specific Duration
-```bash
-# Run for exactly 3 hours
-tsx src/claude-schedule.ts run --hours 3
-
-# Run for 2.5 hours
-tsx src/claude-schedule.ts run --hours 2.5
-```
-
-## 🚀 Development
+## 🧪 开发
 
 ```bash
-npm run build    # Compile TypeScript to JavaScript
-npm run start    # Run with default command (help)
+npm run build
+npm run start
 ```
-
-## 📝 Example Use Cases
-
-- **Code Generation**: Automate multiple coding tasks with wait periods
-- **Content Creation**: Schedule content generation with rate limiting
-- **Data Processing**: Batch process requests with intelligent waiting
-- **Development Workflow**: Automate repetitive development tasks
 
 ## 📄 License
 
 MIT License - Built with Claude Code
-
----
-
-**Note**: This tool is designed for automating AI agent prompts. Currently supports Claude Code. The included `prompts.jsonl` file contains example prompts for demonstration purposes. Configure your own prompts based on your automation needs.
