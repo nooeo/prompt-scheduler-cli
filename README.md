@@ -56,7 +56,8 @@ tmux list-panes -t ai-worker
 npm run run -- --mode sequential --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
 ```
 
-可选：如果有明确的 P1，可加上 `--root-prompt` 或 `--root-prompt-file`。
+可选：如果有明确的 P1，可加上 `--root-prompt` 或 `--root-prompt-file`。  
+可选：如需把 Claude Code 全部聊天记录发给 reviewer，加上 `--reviewer-history`。
 
 4) 查看效果（示例日志）：
 ```bash
@@ -96,10 +97,10 @@ cat user-instructions-log.md
 
 ## 🔌 后处理 hook（核心闭环）
 
-`--post-process-cmd` 会把 `{prompt, output, taskIndex, rootPrompt}` JSON 写入 stdin：
+`--post-process-cmd` 会把 `{prompt, output, taskIndex, rootPrompt, conversationHistory}` JSON 写入 stdin：
 
 ```json
-{"prompt":"...","output":"...","taskIndex":3,"rootPrompt":"..."}
+{"prompt":"...","output":"...","taskIndex":3,"rootPrompt":"...","conversationHistory":"..."}
 ```
 
 Hook 可以输出：
@@ -107,7 +108,8 @@ Hook 可以输出：
 - **JSONL**：每行一个 prompt 对象（缺失字段会补默认）
 
 > 只要设置了 `--post-process-cmd`，就会自动等待 marker（无需额外 `--wait-for-marker`）。
-> `rootPrompt` 为 P1“创世提示词”，用于让 reviewer 理解终极目标背景。
+> `rootPrompt` 为 P1“创世提示词”，用于让 reviewer 理解终极目标背景。  
+> `conversationHistory` 需要开启 `--reviewer-history`，内容为 tmux 捕获的历史文本。
 
 ## 🔁 AI 接替次数与停止策略
 
@@ -158,6 +160,8 @@ npm run help     # 帮助
 | `--root-prompt-file PATH` | 从文件读取 P1 |
 | `--ai-max-prompts N` | 限制 AI 追加的 prompt 数量 |
 | `--log-file PATH` | 复盘日志输出路径（默认 `user-instructions-log.md`） |
+| `--reviewer-history` | 把 tmux 历史记录发送给 reviewer |
+| `--reviewer-history-lines N` | reviewer 历史行数（默认等于 `--capture-lines`） |
 | `--task-marker [PREFIX]` | 注入完成标记（默认 `PS_TASK_END`） |
 | `--wait-for-marker` | 等待完成标记 |
 | `--post-process-cmd CMD` | 调用 hook（stdin JSON） |

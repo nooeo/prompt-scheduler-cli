@@ -115,6 +115,7 @@ async function main() {
   const output = payload.output || '';
   const taskIndex = payload.taskIndex || 0;
   const rootPrompt = payload.rootPrompt || '';
+  const conversationHistory = payload.conversationHistory || '';
   const userContentParts = [];
 
   if (rootPrompt) {
@@ -128,6 +129,12 @@ async function main() {
   userContentParts.push(`原始任务：${prompt}`);
   userContentParts.push('');
   userContentParts.push(`任务编号：${taskIndex}`);
+
+  if (conversationHistory) {
+    userContentParts.push('');
+    userContentParts.push('Claude Code 全部聊天记录（tmux 捕获）：');
+    userContentParts.push(conversationHistory);
+  }
 
   const userContent = userContentParts.join('\n');
 

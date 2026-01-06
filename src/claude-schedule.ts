@@ -53,6 +53,8 @@ interface ScheduleOptions {
   rootPromptFile?: string; // root prompt file path
   aiMaxPrompts?: number; // max AI-generated prompts
   logFile?: string; // log file path
+  reviewerHistory?: boolean; // include tmux history in reviewer payload
+  reviewerHistoryLines?: number; // reviewer history lines
   taskMarkerPrefix?: string; // completion marker prefix
   waitForMarker?: boolean; // wait for completion marker before continuing
   postProcessCmd?: string; // post-process hook command
@@ -124,6 +126,8 @@ function showHelp(): void {
   console.log(colors.info('  --root-prompt-file') + colors.muted(' - Load P1 root prompt from file'));
   console.log(colors.info('  --ai-max-prompts') + colors.muted(' - Limit AI-generated prompts (omit to let AI decide)'));
   console.log(colors.info('  --log-file') + colors.muted(` - Write run log markdown (default: ${DEFAULT_RUN_LOG_FILE})`));
+  console.log(colors.info('  --reviewer-history') + colors.muted(' - Include tmux history in reviewer payload'));
+  console.log(colors.info('  --reviewer-history-lines') + colors.muted(' - Tmux history lines for reviewer (default: capture-lines)'));
   console.log(colors.info('  --post-process-cmd') + colors.muted(' - Run hook command with {prompt, output, taskIndex} JSON on stdin'));
   console.log(colors.info('  --task-marker') + colors.muted(` - Enable completion marker injection (default prefix: ${DEFAULT_MARKER_PREFIX})`));
   console.log(colors.info('  --wait-for-marker') + colors.muted(' - Wait for completion marker before continuing'));
@@ -561,7 +565,16 @@ function writeRunLog(logFile: string, meta: RunLogMeta, entries: RunLogEntry[]):
   writeFileSync(logFile, content, 'utf8');
 }
 
-function runPostProcess(cmd: string, payload: { prompt: string; output: string; taskIndex: number; rootPrompt?: string }): string {
+function runPostProcess(
+  cmd: string,
+  payload: {
+    prompt: string;
+    output: string;
+    taskIndex: number;
+    rootPrompt?: string;
+    conversationHistory?: string;
+  }
+): string {
   try {
     return execSync(cmd, { input: JSON.stringify(payload) }).toString();
   } catch (error) {
@@ -585,6 +598,8 @@ interface ExecutionContext {
   postProcessCmd?: string;
   rootPrompt?: string;
   aiMaxPrompts?: number;
+  reviewerHistory?: boolean;
+  reviewerHistoryLines?: number;
   markerPollMs: number;
   markerTimeoutMs?: number;
 }
@@ -664,11 +679,17 @@ async function executePromptWithHooks(
   let appendedSkipped = 0;
 
   if (ctx.postProcessCmd) {
+    const reviewerLines = ctx.reviewerHistoryLines || ctx.captureLines;
+    const conversationHistory = ctx.reviewerHistory
+      ? tmuxCapturePane(promptData.tmux_session, reviewerLines)
+      : undefined;
+
     postProcessOutput = runPostProcess(ctx.postProcessCmd, {
       prompt: promptData.prompt,
       output,
       taskIndex,
-      rootPrompt: ctx.rootPrompt
+      rootPrompt: ctx.rootPrompt,
+      conversationHistory
     });
     const newPrompts = parsePostProcessOutput(postProcessOutput, promptData);
     if (newPrompts.length > 0) {
@@ -736,6 +757,16 @@ function parseArgs(): { command: string; options: ScheduleOptions } {
       i++; // Skip next arg
     } else if (args[i] === '--log-file' && args[i + 1]) {
       options.logFile = args[i + 1];
+      i++; // Skip next arg
+    } else if (args[i] === '--reviewer-history') {
+      options.reviewerHistory = true;
+    } else if (args[i] === '--reviewer-history-lines' && args[i + 1]) {
+      const value = parseInt(args[i + 1]);
+      if (Number.isNaN(value) || value <= 0) {
+        console.log(colors.error(`❌ Invalid reviewer history lines: ${args[i + 1]}`));
+        process.exit(1);
+      }
+      options.reviewerHistoryLines = value;
       i++; // Skip next arg
     } else if (args[i] === '--post-process-cmd' && args[i + 1]) {
       options.postProcessCmd = args[i + 1];
@@ -1044,6 +1075,8 @@ async function main(): Promise<void> {
     postProcessCmd: options.postProcessCmd,
     rootPrompt: undefined,
     aiMaxPrompts: options.aiMaxPrompts,
+    reviewerHistory: options.reviewerHistory,
+    reviewerHistoryLines: options.reviewerHistoryLines,
     markerPollMs,
     markerTimeoutMs
   };
@@ -1083,6 +1116,18 @@ async function main(): Promise<void> {
       console.log(colors.info(`🔁 AI max prompts: ${options.aiMaxPrompts}`));
     }
     console.log(colors.info(`📝 Run log: ${logFile}`));
+    if (executionContext.reviewerHistory) {
+      const reviewerLines = executionContext.reviewerHistoryLines || captureLines;
+      console.log(colors.info(`🧾 Reviewer history lines: ${reviewerLines}`));
+    }
+    if (executionContext.reviewerHistory) {
+      const reviewerLines = executionContext.reviewerHistoryLines || captureLines;
+      console.log(colors.info(`🧾 Reviewer history lines: ${reviewerLines}`));
+    }
+    if (executionContext.reviewerHistory) {
+      const reviewerLines = executionContext.reviewerHistoryLines || captureLines;
+      console.log(colors.info(`🧾 Reviewer history lines: ${reviewerLines}`));
+    }
     if (executionContext.enableMarker) {
       const markerLabel = executionContext.markerRunId
         ? `${executionContext.markerPrefix}:${executionContext.markerRunId}-###`
