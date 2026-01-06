@@ -41,6 +41,7 @@ interface PromptResult {
 }
 
 type ClearInputMode = 'none' | 'escape' | 'ctrl-c';
+type ReviewerHistoryMode = 'tmux' | 'run-log';
 
 interface ScheduleOptions {
   stopAtTime?: string; // "3pm", "15:00", etc.
@@ -54,6 +55,7 @@ interface ScheduleOptions {
   aiMaxPrompts?: number; // max AI-generated prompts
   logFile?: string; // log file path
   reviewerHistory?: boolean; // include tmux history in reviewer payload
+  reviewerHistoryMode?: ReviewerHistoryMode; // reviewer history mode
   reviewerHistoryLines?: number; // reviewer history lines
   taskMarkerPrefix?: string; // completion marker prefix
   waitForMarker?: boolean; // wait for completion marker before continuing
@@ -127,6 +129,7 @@ function showHelp(): void {
   console.log(colors.info('  --ai-max-prompts') + colors.muted(' - Limit AI-generated prompts (omit to let AI decide)'));
   console.log(colors.info('  --log-file') + colors.muted(` - Write run log markdown (default: ${DEFAULT_RUN_LOG_FILE})`));
   console.log(colors.info('  --reviewer-history') + colors.muted(' - Include tmux history in reviewer payload'));
+  console.log(colors.info('  --reviewer-history-mode') + colors.muted(' - History mode: tmux or run-log'));
   console.log(colors.info('  --reviewer-history-lines') + colors.muted(' - Tmux history lines for reviewer (default: capture-lines)'));
   console.log(colors.info('  --post-process-cmd') + colors.muted(' - Run hook command with {prompt, output, taskIndex} JSON on stdin'));
   console.log(colors.info('  --task-marker') + colors.muted(` - Enable completion marker injection (default prefix: ${DEFAULT_MARKER_PREFIX})`));
@@ -565,6 +568,24 @@ function writeRunLog(logFile: string, meta: RunLogMeta, entries: RunLogEntry[]):
   writeFileSync(logFile, content, 'utf8');
 }
 
+function formatReviewerHistory(entries: RunLogEntry[]): string {
+  if (entries.length === 0) {
+    return '';
+  }
+
+  const lines: string[] = [];
+  entries.forEach(entry => {
+    lines.push(`Task ${entry.taskIndex} (prompt ${entry.promptIndex})`);
+    lines.push('Prompt:');
+    lines.push(entry.prompt);
+    lines.push('Output:');
+    lines.push(entry.output || '');
+    lines.push('---');
+  });
+
+  return lines.join('\n');
+}
+
 function runPostProcess(
   cmd: string,
   payload: {
@@ -598,7 +619,7 @@ interface ExecutionContext {
   postProcessCmd?: string;
   rootPrompt?: string;
   aiMaxPrompts?: number;
-  reviewerHistory?: boolean;
+  reviewerHistoryMode?: ReviewerHistoryMode;
   reviewerHistoryLines?: number;
   markerPollMs: number;
   markerTimeoutMs?: number;
@@ -679,10 +700,13 @@ async function executePromptWithHooks(
   let appendedSkipped = 0;
 
   if (ctx.postProcessCmd) {
-    const reviewerLines = ctx.reviewerHistoryLines || ctx.captureLines;
-    const conversationHistory = ctx.reviewerHistory
-      ? tmuxCapturePane(promptData.tmux_session, reviewerLines)
-      : undefined;
+    let conversationHistory: string | undefined;
+    if (ctx.reviewerHistoryMode === 'tmux') {
+      const reviewerLines = ctx.reviewerHistoryLines || ctx.captureLines;
+      conversationHistory = tmuxCapturePane(promptData.tmux_session, reviewerLines);
+    } else if (ctx.reviewerHistoryMode === 'run-log') {
+      conversationHistory = formatReviewerHistory(runLogEntries);
+    }
 
     postProcessOutput = runPostProcess(ctx.postProcessCmd, {
       prompt: promptData.prompt,
@@ -760,6 +784,15 @@ function parseArgs(): { command: string; options: ScheduleOptions } {
       i++; // Skip next arg
     } else if (args[i] === '--reviewer-history') {
       options.reviewerHistory = true;
+    } else if (args[i] === '--reviewer-history-mode' && args[i + 1]) {
+      const mode = args[i + 1] as ReviewerHistoryMode;
+      if (mode === 'tmux' || mode === 'run-log') {
+        options.reviewerHistoryMode = mode;
+      } else {
+        console.log(colors.error(`❌ Invalid reviewer history mode: ${mode}. Valid modes: tmux, run-log`));
+        process.exit(1);
+      }
+      i++; // Skip next arg
     } else if (args[i] === '--reviewer-history-lines' && args[i + 1]) {
       const value = parseInt(args[i + 1]);
       if (Number.isNaN(value) || value <= 0) {
@@ -1059,6 +1092,7 @@ async function main(): Promise<void> {
     ? options.markerTimeoutMs
     : undefined;
   const clearInput = options.clearInput || DEFAULT_CLEAR_INPUT;
+  const reviewerHistoryMode = options.reviewerHistoryMode || (options.reviewerHistory ? 'tmux' : undefined);
   const waitForMarker = options.waitForMarker || Boolean(options.postProcessCmd);
   const enableMarker = Boolean(options.taskMarkerPrefix || waitForMarker);
   const markerPrefix = options.taskMarkerPrefix || DEFAULT_MARKER_PREFIX;
@@ -1075,7 +1109,7 @@ async function main(): Promise<void> {
     postProcessCmd: options.postProcessCmd,
     rootPrompt: undefined,
     aiMaxPrompts: options.aiMaxPrompts,
-    reviewerHistory: options.reviewerHistory,
+    reviewerHistoryMode,
     reviewerHistoryLines: options.reviewerHistoryLines,
     markerPollMs,
     markerTimeoutMs
@@ -1116,17 +1150,26 @@ async function main(): Promise<void> {
       console.log(colors.info(`🔁 AI max prompts: ${options.aiMaxPrompts}`));
     }
     console.log(colors.info(`📝 Run log: ${logFile}`));
-    if (executionContext.reviewerHistory) {
+    if (executionContext.reviewerHistoryMode) {
       const reviewerLines = executionContext.reviewerHistoryLines || captureLines;
-      console.log(colors.info(`🧾 Reviewer history lines: ${reviewerLines}`));
+      console.log(colors.info(`🧾 Reviewer history: ${executionContext.reviewerHistoryMode}`));
+      if (executionContext.reviewerHistoryMode === 'tmux') {
+        console.log(colors.info(`🧾 Reviewer history lines: ${reviewerLines}`));
+      }
     }
-    if (executionContext.reviewerHistory) {
+    if (executionContext.reviewerHistoryMode) {
       const reviewerLines = executionContext.reviewerHistoryLines || captureLines;
-      console.log(colors.info(`🧾 Reviewer history lines: ${reviewerLines}`));
+      console.log(colors.info(`🧾 Reviewer history: ${executionContext.reviewerHistoryMode}`));
+      if (executionContext.reviewerHistoryMode === 'tmux') {
+        console.log(colors.info(`🧾 Reviewer history lines: ${reviewerLines}`));
+      }
     }
-    if (executionContext.reviewerHistory) {
+    if (executionContext.reviewerHistoryMode) {
       const reviewerLines = executionContext.reviewerHistoryLines || captureLines;
-      console.log(colors.info(`🧾 Reviewer history lines: ${reviewerLines}`));
+      console.log(colors.info(`🧾 Reviewer history: ${executionContext.reviewerHistoryMode}`));
+      if (executionContext.reviewerHistoryMode === 'tmux') {
+        console.log(colors.info(`🧾 Reviewer history lines: ${reviewerLines}`));
+      }
     }
     if (executionContext.enableMarker) {
       const markerLabel = executionContext.markerRunId

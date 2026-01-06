@@ -132,7 +132,7 @@ async function main() {
 
   if (conversationHistory) {
     userContentParts.push('');
-    userContentParts.push('Claude Code 全部聊天记录（tmux 捕获）：');
+    userContentParts.push('Claude Code 历史记录：');
     userContentParts.push(conversationHistory);
   }
 

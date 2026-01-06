@@ -57,7 +57,7 @@ npm run run -- --mode sequential --task-marker --wait-for-marker --post-process-
 ```
 
 可选：如果有明确的 P1，可加上 `--root-prompt` 或 `--root-prompt-file`。  
-可选：如需把 Claude Code 全部聊天记录发给 reviewer，加上 `--reviewer-history`。
+可选：如需把历史上下文发给 reviewer，可用 `--reviewer-history`（tmux 全部历史）或 `--reviewer-history-mode run-log`（任务摘要历史）。
 
 4) 查看效果（示例日志）：
 ```bash
@@ -109,7 +109,7 @@ Hook 可以输出：
 
 > 只要设置了 `--post-process-cmd`，就会自动等待 marker（无需额外 `--wait-for-marker`）。
 > `rootPrompt` 为 P1“创世提示词”，用于让 reviewer 理解终极目标背景。  
-> `conversationHistory` 需要开启 `--reviewer-history`，内容为 tmux 捕获的历史文本。
+> `conversationHistory` 需要开启 `--reviewer-history` 或 `--reviewer-history-mode run-log`。
 
 ## 🔁 AI 接替次数与停止策略
 
@@ -161,6 +161,7 @@ npm run help     # 帮助
 | `--ai-max-prompts N` | 限制 AI 追加的 prompt 数量 |
 | `--log-file PATH` | 复盘日志输出路径（默认 `user-instructions-log.md`） |
 | `--reviewer-history` | 把 tmux 历史记录发送给 reviewer |
+| `--reviewer-history-mode MODE` | 历史模式：`tmux` 或 `run-log` |
 | `--reviewer-history-lines N` | reviewer 历史行数（默认等于 `--capture-lines`） |
 | `--task-marker [PREFIX]` | 注入完成标记（默认 `PS_TASK_END`） |
 | `--wait-for-marker` | 等待完成标记 |
