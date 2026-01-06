@@ -1,8 +1,8 @@
 #!/usr/bin/env tsx
 
 import { execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'fs';
-import { resolve } from 'path';
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from 'fs';
+import { resolve, dirname } from 'path';
 import dayjs from 'dayjs';
 import chalk from 'chalk';
 
@@ -11,6 +11,8 @@ const DEFAULT_MARKER_PREFIX = 'PS_TASK_END';
 const DEFAULT_CAPTURE_LINES = 2000;
 const DEFAULT_MARKER_POLL_MS = 1000;
 const DEFAULT_MARKER_ANCHOR_LINES = 20;
+const DEFAULT_RUN_LOG_FILE = 'user-instructions-log.md';
+const DEFAULT_STOP_SIGNAL = 'PS_TASK_STOP';
 const DEFAULT_CLEAR_INPUT: ClearInputMode = 'none';
 
 // Modern color palette
@@ -47,6 +49,10 @@ interface ScheduleOptions {
   ignoreApproachingLimit?: boolean; // ignore "Approaching usage limit" messages
   mode?: 'repeat' | 'sequential'; // execution mode
   clearInput?: ClearInputMode; // clear input before sending prompt
+  rootPrompt?: string; // P1 root prompt
+  rootPromptFile?: string; // root prompt file path
+  aiMaxPrompts?: number; // max AI-generated prompts
+  logFile?: string; // log file path
   taskMarkerPrefix?: string; // completion marker prefix
   waitForMarker?: boolean; // wait for completion marker before continuing
   postProcessCmd?: string; // post-process hook command
@@ -114,6 +120,10 @@ function showHelp(): void {
   
   console.log(colors.primary('\n📄 FILE OPTIONS:'));
   console.log(colors.info('  --prompt-file') + colors.muted(' - Use custom prompt file (e.g., --prompt-file /path/to/prompts.jsonl)'));
+  console.log(colors.info('  --root-prompt') + colors.muted(' - Set P1 root prompt (string) for reviewer context'));
+  console.log(colors.info('  --root-prompt-file') + colors.muted(' - Load P1 root prompt from file'));
+  console.log(colors.info('  --ai-max-prompts') + colors.muted(' - Limit AI-generated prompts (omit to let AI decide)'));
+  console.log(colors.info('  --log-file') + colors.muted(` - Write run log markdown (default: ${DEFAULT_RUN_LOG_FILE})`));
   console.log(colors.info('  --post-process-cmd') + colors.muted(' - Run hook command with {prompt, output, taskIndex} JSON on stdin'));
   console.log(colors.info('  --task-marker') + colors.muted(` - Enable completion marker injection (default prefix: ${DEFAULT_MARKER_PREFIX})`));
   console.log(colors.info('  --wait-for-marker') + colors.muted(' - Wait for completion marker before continuing'));
@@ -402,12 +412,20 @@ function parsePostProcessOutput(output: string, fallback: PromptData): PromptDat
     return [];
   }
 
+  const normalizedStop = trimmed.replace(/\s+/g, '');
+  if (normalizedStop === DEFAULT_STOP_SIGNAL || normalizedStop === `[${DEFAULT_STOP_SIGNAL}]`) {
+    return [];
+  }
+
   const lines = trimmed.split('\n').filter(line => line.trim().length > 0);
   const parsedLines: PromptData[] = [];
 
   for (const line of lines) {
     try {
       const parsed = JSON.parse(line) as Partial<PromptData>;
+      if ((parsed as { action?: string; stop?: boolean }).action === 'stop' || (parsed as { stop?: boolean }).stop === true) {
+        return [];
+      }
       const normalized = normalizePromptJson(parsed, fallback);
       if (!normalized) {
         return [normalizePromptData(trimmed, fallback)];
@@ -432,7 +450,118 @@ function appendPrompts(promptFile: string, prompts: PromptData[]): void {
   appendFileSync(promptFile, `${needsNewline ? '\n' : ''}${serialized}`);
 }
 
-function runPostProcess(cmd: string, payload: { prompt: string; output: string; taskIndex: number }): string {
+function resolveRootPrompt(options: ScheduleOptions, promptFile: string): string | undefined {
+  if (options.rootPrompt && options.rootPrompt.trim()) {
+    return options.rootPrompt.trim();
+  }
+
+  if (options.rootPromptFile) {
+    const content = readFileSync(options.rootPromptFile, 'utf8').trim();
+    if (content) {
+      return content;
+    }
+  }
+
+  const prompts = loadPrompts(promptFile);
+  if (prompts.length > 0) {
+    return prompts[0].prompt;
+  }
+
+  return undefined;
+}
+
+function formatRunLog(meta: RunLogMeta, entries: RunLogEntry[]): string {
+  const lines: string[] = [];
+  lines.push('# Prompt Scheduler Run');
+  lines.push('');
+  lines.push(`- Start: ${meta.startTime}`);
+  if (meta.endTime) {
+    lines.push(`- End: ${meta.endTime}`);
+  }
+  lines.push(`- Prompt File: ${meta.promptFile}`);
+  lines.push(`- Mode: ${meta.mode}`);
+  if (meta.markerPrefix) {
+    lines.push(`- Marker Prefix: ${meta.markerPrefix}`);
+  }
+  if (typeof meta.aiMaxPrompts === 'number') {
+    lines.push(`- AI Max Prompts: ${meta.aiMaxPrompts}`);
+  }
+  lines.push('');
+
+  if (meta.rootPrompt) {
+    lines.push('## Root Prompt (P1)');
+    lines.push('```');
+    lines.push(meta.rootPrompt);
+    lines.push('```');
+    lines.push('');
+  }
+
+  if (entries.length === 0) {
+    lines.push('## Summary');
+    lines.push('No prompts executed.');
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  entries.forEach(entry => {
+    lines.push(`## Task ${entry.taskIndex}`);
+    lines.push(`- Prompt Index: ${entry.promptIndex}`);
+    if (entry.marker) {
+      lines.push(`- Marker: ${entry.marker}`);
+    }
+    lines.push(`- Timestamp: ${new Date(entry.timestamp).toISOString()}`);
+    lines.push('');
+    lines.push('### Prompt');
+    lines.push('```');
+    lines.push(entry.prompt);
+    lines.push('```');
+    lines.push('');
+    lines.push('### Output');
+    lines.push('```');
+    lines.push(entry.output || '');
+    lines.push('```');
+    lines.push('');
+
+    if (entry.postProcessOutput !== undefined) {
+      lines.push('### Post-Process Output');
+      lines.push('```');
+      lines.push(entry.postProcessOutput || '');
+      lines.push('```');
+      lines.push('');
+    }
+
+    if (entry.appendedPrompts && entry.appendedPrompts.length > 0) {
+      lines.push('### Appended Prompts');
+      entry.appendedPrompts.forEach((prompt, index) => {
+        lines.push(`${index + 1}. ${prompt}`);
+      });
+      lines.push('');
+    }
+
+    if (entry.appendedSkipped && entry.appendedSkipped > 0) {
+      lines.push(`- Skipped Appended Prompts: ${entry.appendedSkipped}`);
+      lines.push('');
+    }
+  });
+
+  return lines.join('\n');
+}
+
+function writeRunLog(logFile: string, meta: RunLogMeta, entries: RunLogEntry[]): void {
+  if (!logFile) {
+    return;
+  }
+
+  const logDir = dirname(logFile);
+  if (logDir && logDir !== '.') {
+    mkdirSync(logDir, { recursive: true });
+  }
+
+  const content = formatRunLog(meta, entries);
+  writeFileSync(logFile, content, 'utf8');
+}
+
+function runPostProcess(cmd: string, payload: { prompt: string; output: string; taskIndex: number; rootPrompt?: string }): string {
   try {
     return execSync(cmd, { input: JSON.stringify(payload) }).toString();
   } catch (error) {
@@ -454,8 +583,37 @@ interface ExecutionContext {
   markerRunId: string;
   waitForMarker: boolean;
   postProcessCmd?: string;
+  rootPrompt?: string;
+  aiMaxPrompts?: number;
   markerPollMs: number;
   markerTimeoutMs?: number;
+}
+
+interface AiPromptBudget {
+  remaining: number | null;
+  totalAppended: number;
+}
+
+interface RunLogEntry {
+  taskIndex: number;
+  promptIndex: number;
+  prompt: string;
+  marker?: string;
+  output?: string;
+  postProcessOutput?: string;
+  appendedPrompts?: string[];
+  appendedSkipped?: number;
+  timestamp: number;
+}
+
+interface RunLogMeta {
+  startTime: string;
+  endTime?: string;
+  promptFile: string;
+  mode: string;
+  markerPrefix?: string;
+  rootPrompt?: string;
+  aiMaxPrompts?: number;
 }
 
 async function executePromptWithHooks(
@@ -463,7 +621,10 @@ async function executePromptWithHooks(
   promptFile: string,
   ctx: ExecutionContext,
   skipUsageLimitCheck: boolean,
-  taskIndex: number
+  taskIndex: number,
+  promptIndex: number,
+  aiBudget: AiPromptBudget,
+  runLogEntries: RunLogEntry[]
 ): Promise<void> {
   const marker = ctx.enableMarker ? buildTaskMarker(taskIndex, ctx.markerPrefix, ctx.markerRunId) : '';
   const preparedPrompt = marker ? wrapPromptWithMarker(promptData.prompt, marker) : promptData.prompt;
@@ -498,18 +659,50 @@ async function executePromptWithHooks(
     );
   }
 
+  let postProcessOutput: string | undefined;
+  let appendedPrompts: string[] = [];
+  let appendedSkipped = 0;
+
   if (ctx.postProcessCmd) {
-    const postOutput = runPostProcess(ctx.postProcessCmd, {
+    postProcessOutput = runPostProcess(ctx.postProcessCmd, {
       prompt: promptData.prompt,
       output,
-      taskIndex
+      taskIndex,
+      rootPrompt: ctx.rootPrompt
     });
-    const newPrompts = parsePostProcessOutput(postOutput, promptData);
+    const newPrompts = parsePostProcessOutput(postProcessOutput, promptData);
     if (newPrompts.length > 0) {
-      appendPrompts(promptFile, newPrompts);
-      console.log(colors.success(`🧩 Appended ${newPrompts.length} prompt(s) from post-process hook`));
+      const allowed = aiBudget.remaining === null
+        ? newPrompts.length
+        : Math.max(0, Math.min(aiBudget.remaining, newPrompts.length));
+      if (allowed > 0) {
+        const toAppend = newPrompts.slice(0, allowed);
+        appendPrompts(promptFile, toAppend);
+        aiBudget.totalAppended += allowed;
+        if (aiBudget.remaining !== null) {
+          aiBudget.remaining -= allowed;
+        }
+        appendedPrompts = toAppend.map(item => item.prompt);
+        console.log(colors.success(`🧩 Appended ${allowed} prompt(s) from post-process hook`));
+      }
+      appendedSkipped = newPrompts.length - allowed;
+      if (appendedSkipped > 0) {
+        console.log(colors.warning(`⚠️  Skipped ${appendedSkipped} AI prompt(s) due to ai-max-prompts limit`));
+      }
     }
   }
+
+  runLogEntries.push({
+    taskIndex,
+    promptIndex,
+    prompt: promptData.prompt,
+    marker: marker || undefined,
+    output,
+    postProcessOutput,
+    appendedPrompts: appendedPrompts.length > 0 ? appendedPrompts : undefined,
+    appendedSkipped: appendedSkipped > 0 ? appendedSkipped : undefined,
+    timestamp: Date.now()
+  });
 }
 
 function parseArgs(): { command: string; options: ScheduleOptions } {
@@ -526,6 +719,23 @@ function parseArgs(): { command: string; options: ScheduleOptions } {
       i++; // Skip next arg
     } else if (args[i] === '--prompt-file' && args[i + 1]) {
       options.promptFile = args[i + 1];
+      i++; // Skip next arg
+    } else if (args[i] === '--root-prompt' && args[i + 1]) {
+      options.rootPrompt = args[i + 1];
+      i++; // Skip next arg
+    } else if (args[i] === '--root-prompt-file' && args[i + 1]) {
+      options.rootPromptFile = args[i + 1];
+      i++; // Skip next arg
+    } else if (args[i] === '--ai-max-prompts' && args[i + 1]) {
+      const value = parseInt(args[i + 1]);
+      if (Number.isNaN(value) || value < 0) {
+        console.log(colors.error(`❌ Invalid ai max prompts: ${args[i + 1]}`));
+        process.exit(1);
+      }
+      options.aiMaxPrompts = value;
+      i++; // Skip next arg
+    } else if (args[i] === '--log-file' && args[i + 1]) {
+      options.logFile = args[i + 1];
       i++; // Skip next arg
     } else if (args[i] === '--post-process-cmd' && args[i + 1]) {
       options.postProcessCmd = args[i + 1];
@@ -832,6 +1042,8 @@ async function main(): Promise<void> {
     markerRunId,
     waitForMarker,
     postProcessCmd: options.postProcessCmd,
+    rootPrompt: undefined,
+    aiMaxPrompts: options.aiMaxPrompts,
     markerPollMs,
     markerTimeoutMs
   };
@@ -841,13 +1053,36 @@ async function main(): Promise<void> {
     console.log(colors.info(`📄 Current prompt file: ${promptFile}\n`));
     return;
   }
-  
+
   if (command === 'run') {
     const startTime = dayjs();
+    const rootPrompt = resolveRootPrompt(options, promptFile);
+    executionContext.rootPrompt = rootPrompt;
+    const runLogEntries: RunLogEntry[] = [];
+    const logFile = resolve(options.logFile || DEFAULT_RUN_LOG_FILE);
+    const runLogMeta: RunLogMeta = {
+      startTime: startTime.toISOString(),
+      promptFile,
+      mode,
+      markerPrefix: executionContext.enableMarker ? executionContext.markerPrefix : undefined,
+      rootPrompt,
+      aiMaxPrompts: options.aiMaxPrompts
+    };
+    const aiBudget: AiPromptBudget = {
+      remaining: typeof options.aiMaxPrompts === 'number' ? options.aiMaxPrompts : null,
+      totalAppended: 0
+    };
     console.log(colors.highlight('\n🚀 Starting automated prompt execution...\n'));
     
     console.log(colors.info(`📄 Using prompt file: ${promptFile}`));
     console.log(colors.info(`🔄 Execution mode: ${mode}`));
+    if (rootPrompt) {
+      console.log(colors.info(`🧭 Root prompt loaded`));
+    }
+    if (typeof options.aiMaxPrompts === 'number') {
+      console.log(colors.info(`🔁 AI max prompts: ${options.aiMaxPrompts}`));
+    }
+    console.log(colors.info(`📝 Run log: ${logFile}`));
     if (executionContext.enableMarker) {
       const markerLabel = executionContext.markerRunId
         ? `${executionContext.markerPrefix}:${executionContext.markerRunId}-###`
@@ -890,7 +1125,7 @@ async function main(): Promise<void> {
 
       console.log(colors.primary(`\n🎯 Executing prompt ${index + 1}:`), colors.accent(prompt.prompt));
       // Skip usage limit check for first execution, enable for subsequent ones
-      await executePromptWithHooks(prompt, promptFile, executionContext, isFirstExecution, taskIndex);
+      await executePromptWithHooks(prompt, promptFile, executionContext, isFirstExecution, taskIndex, index + 1, aiBudget, runLogEntries);
       updatePromptStatus(index, true, Date.now(), promptFile);
       executed++;
       console.log(colors.success(`✅ Prompt ${index + 1} completed`));
@@ -913,6 +1148,8 @@ async function main(): Promise<void> {
     }
     
     const elapsedTime = dayjs().diff(startTime, 'minute');
+    runLogMeta.endTime = dayjs().toISOString();
+    writeRunLog(logFile, runLogMeta, runLogEntries);
     console.log(colors.highlight(`\n🎉 Execution completed! (${executed} new executions, ${elapsedTime} minutes elapsed)\n`));
     
   } else if (command === 'next') {
@@ -921,12 +1158,39 @@ async function main(): Promise<void> {
       console.log(colors.warning('⚠️  No unsent prompts found'));
       return;
     }
-    
+
+    const rootPrompt = resolveRootPrompt(options, promptFile);
+    executionContext.rootPrompt = rootPrompt;
+    const runLogEntries: RunLogEntry[] = [];
+    const logFile = resolve(options.logFile || DEFAULT_RUN_LOG_FILE);
+    const runLogMeta: RunLogMeta = {
+      startTime: dayjs().toISOString(),
+      promptFile,
+      mode,
+      markerPrefix: executionContext.enableMarker ? executionContext.markerPrefix : undefined,
+      rootPrompt,
+      aiMaxPrompts: options.aiMaxPrompts
+    };
+    const aiBudget: AiPromptBudget = {
+      remaining: typeof options.aiMaxPrompts === 'number' ? options.aiMaxPrompts : null,
+      totalAppended: 0
+    };
+
+    if (rootPrompt) {
+      console.log(colors.info(`🧭 Root prompt loaded`));
+    }
+    if (typeof options.aiMaxPrompts === 'number') {
+      console.log(colors.info(`🔁 AI max prompts: ${options.aiMaxPrompts}`));
+    }
+    console.log(colors.info(`📝 Run log: ${logFile}`));
+
     const taskIndex = nextPrompt.index + 1;
     console.log(colors.primary(`🎯 Executing next prompt:`), colors.accent(nextPrompt.prompt.prompt));
     // Skip usage limit check for single 'next' execution (initial execution)
-    await executePromptWithHooks(nextPrompt.prompt, promptFile, executionContext, true, taskIndex);
+    await executePromptWithHooks(nextPrompt.prompt, promptFile, executionContext, true, taskIndex, nextPrompt.index + 1, aiBudget, runLogEntries);
     updatePromptStatus(nextPrompt.index, true, Date.now(), promptFile);
+    runLogMeta.endTime = dayjs().toISOString();
+    writeRunLog(logFile, runLogMeta, runLogEntries);
     console.log(colors.success('✅ Prompt completed'));
     
   } else if (command === 'status') {
@@ -958,11 +1222,37 @@ async function main(): Promise<void> {
     }
     
     const { prompt, index } = getPromptByIndex(promptIndex, promptFile);
+    const rootPrompt = resolveRootPrompt(options, promptFile);
+    executionContext.rootPrompt = rootPrompt;
+    const runLogEntries: RunLogEntry[] = [];
+    const logFile = resolve(options.logFile || DEFAULT_RUN_LOG_FILE);
+    const runLogMeta: RunLogMeta = {
+      startTime: dayjs().toISOString(),
+      promptFile,
+      mode,
+      markerPrefix: executionContext.enableMarker ? executionContext.markerPrefix : undefined,
+      rootPrompt,
+      aiMaxPrompts: options.aiMaxPrompts
+    };
+    const aiBudget: AiPromptBudget = {
+      remaining: typeof options.aiMaxPrompts === 'number' ? options.aiMaxPrompts : null,
+      totalAppended: 0
+    };
     
+    if (rootPrompt) {
+      console.log(colors.info(`🧭 Root prompt loaded`));
+    }
+    if (typeof options.aiMaxPrompts === 'number') {
+      console.log(colors.info(`🔁 AI max prompts: ${options.aiMaxPrompts}`));
+    }
+    console.log(colors.info(`📝 Run log: ${logFile}`));
+
     console.log(colors.primary(`🎯 Executing prompt ${promptIndex}:`), colors.accent(prompt.prompt));
     // Skip usage limit check for single index execution (initial execution)
-    await executePromptWithHooks(prompt, promptFile, executionContext, true, promptIndex);
+    await executePromptWithHooks(prompt, promptFile, executionContext, true, promptIndex, promptIndex, aiBudget, runLogEntries);
     updatePromptStatus(index, true, Date.now(), promptFile);
+    runLogMeta.endTime = dayjs().toISOString();
+    writeRunLog(logFile, runLogMeta, runLogEntries);
     console.log(colors.success('✅ Prompt completed'));
   }
 }

@@ -19,6 +19,7 @@
 - **🔄 跳过已发送**：自动忽略已完成任务
 - **⏱️ 使用限额处理**：识别限额提示并自动等待
 - **⏰ 时间控制**：按时间点或时长停止
+- **📝 复盘日志**：运行结束自动生成 Markdown 记录
 
 ## 🛠️ 安装
 
@@ -55,12 +56,18 @@ tmux list-panes -t ai-worker
 npm run run -- --mode sequential --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
 ```
 
+可选：如果有明确的 P1，可加上 `--root-prompt` 或 `--root-prompt-file`。
+
 4) 查看效果（示例日志）：
 ```bash
 cat user-instructions-log.md
 ```
 
 > 若 Claude Code 进入 Rewind 画面，请按 `Esc` 退出。
+
+## 📝 复盘日志
+
+每次执行结束后都会把本次互动过程写入 `user-instructions-log.md`（可用 `--log-file` 指定路径）。
 
 ## 📄 prompts.jsonl 字段
 
@@ -89,10 +96,10 @@ cat user-instructions-log.md
 
 ## 🔌 后处理 hook（核心闭环）
 
-`--post-process-cmd` 会把 `{prompt, output, taskIndex}` JSON 写入 stdin：
+`--post-process-cmd` 会把 `{prompt, output, taskIndex, rootPrompt}` JSON 写入 stdin：
 
 ```json
-{"prompt":"...","output":"...","taskIndex":3}
+{"prompt":"...","output":"...","taskIndex":3,"rootPrompt":"..."}
 ```
 
 Hook 可以输出：
@@ -100,6 +107,24 @@ Hook 可以输出：
 - **JSONL**：每行一个 prompt 对象（缺失字段会补默认）
 
 > 只要设置了 `--post-process-cmd`，就会自动等待 marker（无需额外 `--wait-for-marker`）。
+> `rootPrompt` 为 P1“创世提示词”，用于让 reviewer 理解终极目标背景。
+
+## 🔁 AI 接替次数与停止策略
+
+你有两种选择：
+
+1) **设定 AI 接替次数**：  
+   使用 `--ai-max-prompts N` 限制后续由 AI 追加的 prompt 数量（仅统计本次运行追加的数量）。
+
+2) **让 AI 自行决定停止**：  
+   不设置 `--ai-max-prompts`，当 reviewer 输出空内容或 `[PS_TASK_STOP]` 时，Scheduler 不再追加新任务。
+
+## 🧭 P1（创世提示词）来源
+
+为了让 reviewer 始终理解终极目标，可指定 P1：  
+- `--root-prompt "..."` 直接传字符串  
+- `--root-prompt-file /path/to/p1.txt` 从文件读取  
+未指定时默认使用 `prompts.jsonl` 的第一条 prompt 作为 P1。
 
 ## 🤖 Gemini Reviewer 示例
 
@@ -129,12 +154,17 @@ npm run help     # 帮助
 |---|---|
 | `--mode sequential` | 推荐模式，不依赖历史命令 |
 | `--clear-input MODE` | 清空输入：`none`/`escape`/`ctrl-c`（默认 none，避免触发 Rewind） |
+| `--root-prompt TEXT` | 指定 P1 创世提示词 |
+| `--root-prompt-file PATH` | 从文件读取 P1 |
+| `--ai-max-prompts N` | 限制 AI 追加的 prompt 数量 |
+| `--log-file PATH` | 复盘日志输出路径（默认 `user-instructions-log.md`） |
 | `--task-marker [PREFIX]` | 注入完成标记（默认 `PS_TASK_END`） |
 | `--wait-for-marker` | 等待完成标记 |
 | `--post-process-cmd CMD` | 调用 hook（stdin JSON） |
 | `--capture-lines N` | tmux 历史行数 |
 | `--marker-poll-ms N` | 轮询间隔 |
 | `--marker-timeout-ms N` | 等待超时 |
+| `--ignore-approaching-limit` | 忽略“接近限额”提示 |
 | `--stop-at TIME` | 到时间停止 |
 | `--hours N` | 运行时长 |
 

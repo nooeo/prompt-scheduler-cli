@@ -155,3 +155,9 @@ articles/
 
 # Development notes and temporary files
 .note/
+
+# Prompt Scheduler logs
+user-instructions-log.md
+conversation-flappy-bird.md
+flappy-bird.html
+user-instructions-log.md

@@ -114,14 +114,22 @@ async function main() {
   const prompt = payload.prompt || '';
   const output = payload.output || '';
   const taskIndex = payload.taskIndex || 0;
-  const userContent = [
-    `Claude Code 任务输出如下：`,
-    output,
-    '',
-    `原始任务：${prompt}`,
-    '',
-    `任务编号：${taskIndex}`
-  ].join('\n');
+  const rootPrompt = payload.rootPrompt || '';
+  const userContentParts = [];
+
+  if (rootPrompt) {
+    userContentParts.push(`P1 目标（创世提示词）：\n${rootPrompt}`);
+    userContentParts.push('');
+  }
+
+  userContentParts.push('Claude Code 任务输出如下：');
+  userContentParts.push(output);
+  userContentParts.push('');
+  userContentParts.push(`原始任务：${prompt}`);
+  userContentParts.push('');
+  userContentParts.push(`任务编号：${taskIndex}`);
+
+  const userContent = userContentParts.join('\n');
 
   const requestPayload = {
     model,
