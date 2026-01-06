@@ -11,6 +11,7 @@ const DEFAULT_MARKER_PREFIX = 'PS_TASK_END';
 const DEFAULT_CAPTURE_LINES = 2000;
 const DEFAULT_MARKER_POLL_MS = 1000;
 const DEFAULT_MARKER_ANCHOR_LINES = 20;
+const DEFAULT_CLEAR_INPUT: ClearInputMode = 'none';
 
 // Modern color palette
 const colors = {
@@ -37,12 +38,15 @@ interface PromptResult {
   index: number;
 }
 
+type ClearInputMode = 'none' | 'escape' | 'ctrl-c';
+
 interface ScheduleOptions {
   stopAtTime?: string; // "3pm", "15:00", etc.
   stopAfterHours?: number; // number of hours to run
   promptFile?: string; // custom prompt file path
   ignoreApproachingLimit?: boolean; // ignore "Approaching usage limit" messages
   mode?: 'repeat' | 'sequential'; // execution mode
+  clearInput?: ClearInputMode; // clear input before sending prompt
   taskMarkerPrefix?: string; // completion marker prefix
   waitForMarker?: boolean; // wait for completion marker before continuing
   postProcessCmd?: string; // post-process hook command
@@ -78,6 +82,21 @@ function tmuxCapturePane(session: string, captureLines: number = DEFAULT_CAPTURE
   }
 }
 
+async function clearInputForSession(session: string, mode: ClearInputMode): Promise<void> {
+  if (mode === 'none') {
+    return;
+  }
+
+  if (mode === 'escape') {
+    tmuxSendKeys(session, 'Escape');
+    await sleep(200);
+    tmuxSendKeys(session, 'Escape');
+    return;
+  }
+
+  tmuxSendKeys(session, 'C-c');
+}
+
 function showHelp(): void {
   console.log(colors.highlight('\n 🚀 PROMPT SCHEDULER - Modern AI Agent Automation Tool \n'));
   
@@ -106,6 +125,7 @@ function showHelp(): void {
   console.log(colors.info('  --mode') + colors.muted('        - Execution mode: repeat (default) or sequential'));
   console.log(colors.muted('                    repeat: Use tmux history (Up key) to repeat prompts'));
   console.log(colors.muted('                    sequential: Directly send prompts without history'));
+  console.log(colors.info('  --clear-input') + colors.muted(' - Clear input before sending (none, escape, ctrl-c)'));
   
   console.log(colors.primary('\n⚠️  LIMIT OPTIONS:'));
   console.log(colors.info('  --ignore-approaching-limit') + colors.muted(' - Ignore "Approaching usage limit" messages'));
@@ -428,6 +448,7 @@ interface ExecutionContext {
   mode: 'repeat' | 'sequential';
   ignoreApproachingLimit: boolean;
   captureLines: number;
+  clearInput: ClearInputMode;
   enableMarker: boolean;
   markerPrefix: string;
   markerRunId: string;
@@ -460,6 +481,7 @@ async function executePromptWithHooks(
     ctx.ignoreApproachingLimit,
     ctx.mode,
     ctx.captureLines,
+    ctx.clearInput,
     captureBefore
   );
 
@@ -526,6 +548,15 @@ function parseArgs(): { command: string; options: ScheduleOptions } {
       i++; // Skip next arg
     } else if (args[i] === '--marker-timeout-ms' && args[i + 1]) {
       options.markerTimeoutMs = parseInt(args[i + 1]);
+      i++; // Skip next arg
+    } else if (args[i] === '--clear-input' && args[i + 1]) {
+      const mode = args[i + 1] as ClearInputMode;
+      if (mode === 'none' || mode === 'escape' || mode === 'ctrl-c') {
+        options.clearInput = mode;
+      } else {
+        console.log(colors.error(`❌ Invalid clear input mode: ${mode}. Valid modes: none, escape, ctrl-c`));
+        process.exit(1);
+      }
       i++; // Skip next arg
     } else if (args[i] === '--ignore-approaching-limit') {
       options.ignoreApproachingLimit = true;
@@ -660,6 +691,7 @@ async function executePromptSequential(
   skipUsageLimitCheck: boolean = false,
   ignoreApproaching: boolean = false,
   captureLines: number = DEFAULT_CAPTURE_LINES,
+  clearInputMode: ClearInputMode = DEFAULT_CLEAR_INPUT,
   captureBefore?: () => string
 ): Promise<string> {
   // Check for usage limit before executing (skip for initial/single executions)
@@ -669,10 +701,7 @@ async function executePromptSequential(
   }
   
   // Sequential mode: directly send prompt without using history
-  // Send Escape keys twice to clear any current input
-  tmuxSendKeys(session, 'Escape');
-  await sleep(200);
-  tmuxSendKeys(session, 'Escape');
+  await clearInputForSession(session, clearInputMode);
   
   await sleep(1000);
   
@@ -696,6 +725,7 @@ async function executePromptRepeat(
   skipUsageLimitCheck: boolean = false,
   ignoreApproaching: boolean = false,
   captureLines: number = DEFAULT_CAPTURE_LINES,
+  clearInputMode: ClearInputMode = DEFAULT_CLEAR_INPUT,
   captureBefore?: () => string
 ): Promise<string> {
   // Check for usage limit before executing (skip for initial/single executions)
@@ -705,10 +735,7 @@ async function executePromptRepeat(
   }
   
   // Repeat mode: use tmux history (original implementation)
-  // Send Escape keys twice
-  tmuxSendKeys(session, 'Escape');
-  await sleep(200);
-  tmuxSendKeys(session, 'Escape');
+  await clearInputForSession(session, clearInputMode);
   
   // await sleep(1000);
   // await sleep(5000);
@@ -752,12 +779,29 @@ async function executePrompt(
   ignoreApproaching: boolean = false,
   mode: 'repeat' | 'sequential' = 'repeat',
   captureLines: number = DEFAULT_CAPTURE_LINES,
+  clearInputMode: ClearInputMode = DEFAULT_CLEAR_INPUT,
   captureBefore?: () => string
 ): Promise<string> {
   if (mode === 'sequential') {
-    return executePromptSequential(promptData, session, skipUsageLimitCheck, ignoreApproaching, captureLines, captureBefore);
+    return executePromptSequential(
+      promptData,
+      session,
+      skipUsageLimitCheck,
+      ignoreApproaching,
+      captureLines,
+      clearInputMode,
+      captureBefore
+    );
   }
-  return executePromptRepeat(promptData, session, skipUsageLimitCheck, ignoreApproaching, captureLines, captureBefore);
+  return executePromptRepeat(
+    promptData,
+    session,
+    skipUsageLimitCheck,
+    ignoreApproaching,
+    captureLines,
+    clearInputMode,
+    captureBefore
+  );
 }
 
 async function main(): Promise<void> {
@@ -773,6 +817,7 @@ async function main(): Promise<void> {
   const markerTimeoutMs = Number.isFinite(options.markerTimeoutMs) && (options.markerTimeoutMs as number) > 0
     ? options.markerTimeoutMs
     : undefined;
+  const clearInput = options.clearInput || DEFAULT_CLEAR_INPUT;
   const waitForMarker = options.waitForMarker || Boolean(options.postProcessCmd);
   const enableMarker = Boolean(options.taskMarkerPrefix || waitForMarker);
   const markerPrefix = options.taskMarkerPrefix || DEFAULT_MARKER_PREFIX;
@@ -781,6 +826,7 @@ async function main(): Promise<void> {
     mode,
     ignoreApproachingLimit: options.ignoreApproachingLimit || false,
     captureLines,
+    clearInput,
     enableMarker,
     markerPrefix,
     markerRunId,

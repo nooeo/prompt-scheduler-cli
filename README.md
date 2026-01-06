@@ -121,6 +121,7 @@ tsx src/claude-schedule.ts run --prompt-file ~/my-prompts.jsonl --mode sequentia
 | `run --hours N` | Execute prompts for N hours |
 | `run --prompt-file PATH` | Use custom prompt file instead of default |
 | `run --mode MODE` | Set execution mode: `repeat` (default) or `sequential` |
+| `run --clear-input MODE` | Clear input before sending (`none`, `escape`, `ctrl-c`) |
 | `run --ignore-approaching-limit` | Ignore "Approaching usage limit" messages |
 | `run --task-marker [PREFIX]` | Inject completion marker wrapper (default prefix: `PS_TASK_END`) |
 | `run --wait-for-marker` | Wait for completion marker before continuing |
@@ -180,6 +181,8 @@ The scheduler supports two execution modes:
 
 - **`repeat` (default)**: Uses tmux command history (Up arrow key) to repeat previous prompts, then overwrites with new content. This mode relies on tmux session history.
 - **`sequential`**: Directly sends prompts without using tmux history. This mode is more straightforward and doesn't depend on previous command history.
+
+`--clear-input` defaults to `none` to avoid triggering Claude Code Rewind. If you need the old behavior, set `--clear-input escape`.
 
 ```bash
 # Use repeat mode (default - uses tmux history)
