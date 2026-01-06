@@ -98,7 +98,7 @@ tsx src/claude-schedule.ts run --ignore-approaching-limit
 tsx src/claude-schedule.ts run --task-marker --wait-for-marker --capture-lines 2000
 
 # Run a post-process hook with {prompt, output, taskIndex} JSON
-tsx src/claude-schedule.ts run --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.js"
+tsx src/claude-schedule.ts run --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
 ```
 
 ### Direct TypeScript Execution
@@ -214,13 +214,13 @@ Use `--capture-lines` to adjust how much tmux history is scanned (default: 2000)
 
 ### Gemini Reviewer Example
 
-The included `scripts/reviewer.js` posts the Claude Code output to a Gemini-compatible endpoint and returns the next instruction.
+The included `scripts/reviewer.cjs` posts the Claude Code output to a Gemini-compatible endpoint and returns the next instruction.
 
 ```bash
 export PS_REVIEWER_API_KEY="your-api-key"
 export PS_REVIEWER_API_URL="http://175.178.33.108:3001"
 export PS_REVIEWER_MODEL="gemini-3-pro"
-tsx src/claude-schedule.ts run --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.js"
+tsx src/claude-schedule.ts run --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
 ```
 
 ## 💡 Usage Limit Handling
