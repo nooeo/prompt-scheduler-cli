@@ -2,8 +2,6 @@
 
 > 基于 tmux 的 Claude Code 自动化调度器，支持完成标记、结果抽取与后处理 hook。
 
-**[📖 日本語版 README](README.ja.md)**
-
 ## 🎯 工作流理念（P1–P6）
 
 - **P1（人工目标/计划）价值最高**：你负责目标设定与关键评审。
@@ -49,12 +47,17 @@ tmux list-panes -t ai-worker
 
 2) 编辑 `prompts/prompts.jsonl`：
 ```jsonl
-{"prompt":"帮我写一个 flapy bird 的html 网页","tmux_session":"ai-worker:0.0","sent":false,"sent_timestamp":null,"default_wait":"0m"}
+{"prompt":"帮我写一个 flappy bird 的html 网页","tmux_session":"ai-worker:0.0","sent":false,"sent_timestamp":null,"default_wait":"0m"}
 ```
 
 3) 运行（推荐 sequential）：
 ```bash
 npm run run -- --mode sequential --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
+```
+
+4) 查看效果（示例日志）：
+```bash
+cat user-instructions-log.md
 ```
 
 > 若 Claude Code 进入 Rewind 画面，请按 `Esc` 退出。
@@ -104,7 +107,7 @@ Hook 可以输出：
 
 ```bash
 export PS_REVIEWER_API_KEY="your-api-key"
-export PS_REVIEWER_API_URL="http://175.178.33.108:3001"
+export PS_REVIEWER_API_URL="your-api-url"
 export PS_REVIEWER_MODEL="gemini-3-pro"
 
 npm run run -- --mode sequential --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.cjs"
@@ -160,3 +163,5 @@ npm run start
 ## 📄 License
 
 MIT License - Built with Claude Code
+
+致谢：https://github.com/prompt-scheduler/cli
