@@ -579,7 +579,35 @@ function loadPrompts(promptFile: string = PROMPTS_FILE): PromptData[] {
   
   return lines.map((line, index) => {
     try {
-      return JSON.parse(line) as PromptData;
+      const raw = JSON.parse(line) as Partial<PromptData> & { sent?: string | boolean };
+      const prompt = typeof raw.prompt === 'string' ? raw.prompt : '';
+      const tmuxSession = typeof raw.tmux_session === 'string' ? raw.tmux_session : '';
+
+      if (!prompt || !tmuxSession) {
+        console.log(colors.error(`❌ Error parsing line ${index + 1}: prompt/tmux_session is required`));
+        process.exit(1);
+      }
+
+      const sentRaw = raw.sent;
+      let sent = "false";
+      if (typeof sentRaw === 'boolean') {
+        sent = sentRaw ? "true" : "false";
+      } else if (typeof sentRaw === 'string') {
+        sent = sentRaw === "true" ? "true" : "false";
+      }
+
+      const sentTimestamp = typeof raw.sent_timestamp === 'number' ? raw.sent_timestamp : null;
+      const defaultWait = typeof raw.default_wait === 'string' && raw.default_wait.trim().length > 0
+        ? raw.default_wait
+        : '0m';
+
+      return {
+        prompt,
+        tmux_session: tmuxSession,
+        sent,
+        sent_timestamp: sentTimestamp,
+        default_wait: defaultWait
+      };
     } catch (error) {
       console.log(colors.error(`❌ Error parsing line ${index + 1}: ${(error as Error).message}`));
       process.exit(1);
