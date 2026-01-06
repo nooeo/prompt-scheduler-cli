@@ -12,6 +12,8 @@
 - **🎨 Modern UI**: Colorful, emoji-rich terminal interface
 - **🖥️ Tmux Integration**: Direct tmux session control for seamless workflow
 - **🔄 Skip Logic**: Automatically skips already sent prompts
+- **🏁 Completion Markers**: Injects task-finish markers and extracts per-task output
+- **🧩 Post-Process Hooks**: Pipe task output into a custom command to generate new prompts
 - **⏰ Time Control**: Stop execution at specific times or after duration limits
 
 ## 🛠️ Installation
@@ -91,6 +93,12 @@ tsx src/claude-schedule.ts run --mode sequential
 
 # Ignore "Approaching usage limit" messages
 tsx src/claude-schedule.ts run --ignore-approaching-limit
+
+# Enable completion markers and wait for task end signal
+tsx src/claude-schedule.ts run --task-marker --wait-for-marker --capture-lines 2000
+
+# Run a post-process hook with {prompt, output, taskIndex} JSON
+tsx src/claude-schedule.ts run --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.js"
 ```
 
 ### Direct TypeScript Execution
@@ -114,6 +122,12 @@ tsx src/claude-schedule.ts run --prompt-file ~/my-prompts.jsonl --mode sequentia
 | `run --prompt-file PATH` | Use custom prompt file instead of default |
 | `run --mode MODE` | Set execution mode: `repeat` (default) or `sequential` |
 | `run --ignore-approaching-limit` | Ignore "Approaching usage limit" messages |
+| `run --task-marker [PREFIX]` | Inject completion marker wrapper (default prefix: `PS_TASK_END`) |
+| `run --wait-for-marker` | Wait for completion marker before continuing |
+| `run --post-process-cmd CMD` | Run hook with `{prompt, output, taskIndex}` JSON on stdin |
+| `run --capture-lines N` | Capture last N tmux history lines for output extraction |
+| `run --marker-poll-ms N` | Poll interval for marker detection |
+| `run --marker-timeout-ms N` | Timeout for marker waiting |
 | `next` | Execute only the next unsent prompt |
 | `status` | Show status of all prompts with timestamps |
 | `reset` | Reset all prompts to unsent status |
@@ -174,6 +188,26 @@ tsx src/claude-schedule.ts run
 # Use sequential mode (direct prompt sending)
 tsx src/claude-schedule.ts run --mode sequential
 ```
+
+## 🧩 Completion Markers & Hooks
+
+When `--task-marker` is enabled, the scheduler wraps each prompt with a completion instruction like:
+
+```
+执行任务：<your prompt>
+
+完成后请只输出一行：[PS_TASK_END:YYMMDDHHmmss-003]
+```
+
+With `--wait-for-marker`, the scheduler polls tmux history (`capture-pane -S -N`) until the marker appears, then extracts only the output for that task. If `--post-process-cmd` is provided, the scheduler sends JSON to stdin:
+
+```json
+{"prompt":"...","output":"...","taskIndex":3}
+```
+
+The hook can return either plain text (treated as a single new prompt) or JSONL lines (each line a prompt object). Missing fields are filled with the current prompt's `tmux_session` and `default_wait`, and new prompts are appended to the prompt file.
+`--post-process-cmd` automatically enables marker waiting even if `--wait-for-marker` is not specified.
+Use `--capture-lines` to adjust how much tmux history is scanned (default: 2000).
 
 ## 💡 Usage Limit Handling
 

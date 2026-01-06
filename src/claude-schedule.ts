@@ -1,12 +1,16 @@
 #!/usr/bin/env tsx
 
 import { execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'fs';
 import { resolve } from 'path';
 import dayjs from 'dayjs';
 import chalk from 'chalk';
 
 const PROMPTS_FILE = './prompts/prompts.jsonl';
+const DEFAULT_MARKER_PREFIX = 'PS_TASK_END';
+const DEFAULT_CAPTURE_LINES = 2000;
+const DEFAULT_MARKER_POLL_MS = 1000;
+const DEFAULT_MARKER_ANCHOR_LINES = 20;
 
 // Modern color palette
 const colors = {
@@ -39,6 +43,12 @@ interface ScheduleOptions {
   promptFile?: string; // custom prompt file path
   ignoreApproachingLimit?: boolean; // ignore "Approaching usage limit" messages
   mode?: 'repeat' | 'sequential'; // execution mode
+  taskMarkerPrefix?: string; // completion marker prefix
+  waitForMarker?: boolean; // wait for completion marker before continuing
+  postProcessCmd?: string; // post-process hook command
+  captureLines?: number; // tmux capture history lines
+  markerPollMs?: number; // marker polling interval
+  markerTimeoutMs?: number; // marker wait timeout
 }
 
 function sleep(ms: number): Promise<void> {
@@ -57,9 +67,10 @@ function tmuxPasteBuffer(session: string): void {
   execSync(`tmux paste-buffer -t "${session}"`);
 }
 
-function tmuxCapturePane(session: string): string {
+function tmuxCapturePane(session: string, captureLines: number = DEFAULT_CAPTURE_LINES): string {
   try {
-    const output = execSync(`tmux capture-pane -t "${session}" -p`).toString();
+    const lineOption = captureLines > 0 ? `-S -${captureLines}` : '';
+    const output = execSync(`tmux capture-pane -t "${session}" -p ${lineOption}`).toString();
     return output;
   } catch (error) {
     console.log(colors.error(`❌ Error capturing tmux pane: ${(error as Error).message}`));
@@ -84,6 +95,12 @@ function showHelp(): void {
   
   console.log(colors.primary('\n📄 FILE OPTIONS:'));
   console.log(colors.info('  --prompt-file') + colors.muted(' - Use custom prompt file (e.g., --prompt-file /path/to/prompts.jsonl)'));
+  console.log(colors.info('  --post-process-cmd') + colors.muted(' - Run hook command with {prompt, output, taskIndex} JSON on stdin'));
+  console.log(colors.info('  --task-marker') + colors.muted(` - Enable completion marker injection (default prefix: ${DEFAULT_MARKER_PREFIX})`));
+  console.log(colors.info('  --wait-for-marker') + colors.muted(' - Wait for completion marker before continuing'));
+  console.log(colors.info('  --capture-lines') + colors.muted(` - Tmux history lines to capture (default: ${DEFAULT_CAPTURE_LINES})`));
+  console.log(colors.info('  --marker-poll-ms') + colors.muted(` - Marker polling interval in ms (default: ${DEFAULT_MARKER_POLL_MS})`));
+  console.log(colors.info('  --marker-timeout-ms') + colors.muted(' - Marker wait timeout in ms (default: no timeout)'));
   
   console.log(colors.primary('\n🔄 MODE OPTIONS:'));
   console.log(colors.info('  --mode') + colors.muted('        - Execution mode: repeat (default) or sequential'));
@@ -99,6 +116,8 @@ function showHelp(): void {
   console.log(colors.success('  • 📊 Status tracking with timestamps'));
   console.log(colors.success('  • 🎯 Skip already sent prompts automatically'));
   console.log(colors.success('  • 🖥️  Direct tmux integration'));
+  console.log(colors.success('  • 🏁 Completion markers with output capture'));
+  console.log(colors.success('  • 🧩 Post-process hook for new prompts'));
   console.log(colors.success('  • ⏰ Time-based execution control'));
   
   console.log(colors.primary('\n🎨 USAGE EXAMPLES:'));
@@ -117,13 +136,13 @@ function showHelp(): void {
   console.log(colors.muted('🎯 Currently supports Claude Code with plans for additional AI agents.'));
 }
 
-async function checkUsageLimit(session: string, skipInitial: boolean = false, ignoreApproaching: boolean = false): Promise<boolean> {
+async function checkUsageLimit(session: string, skipInitial: boolean = false, ignoreApproaching: boolean = false, captureLines: number = DEFAULT_CAPTURE_LINES): Promise<boolean> {
   // Skip usage limit check for initial execution (terminal startup)
   if (skipInitial) {
     return false;
   }
   
-  const content = tmuxCapturePane(session);
+  const content = tmuxCapturePane(session, captureLines);
   
   // Match both "Approaching usage limit" and "Claude usage limit reached" patterns
   const approachingMatch = content.match(/Approaching usage limit · resets at (\d+(am|pm))/i);
@@ -232,6 +251,245 @@ function parseStopTime(timeStr: string): dayjs.Dayjs | null {
   return null;
 }
 
+function buildTaskMarker(taskIndex: number, prefix: string, runId?: string): string {
+  const indexPart = taskIndex.toString().padStart(3, '0');
+  const suffix = runId ? `${runId}-${indexPart}` : indexPart;
+  return `[${prefix}:${suffix}]`;
+}
+
+function wrapPromptWithMarker(prompt: string, marker: string): string {
+  return `执行任务：${prompt}\n\n完成后请只输出一行：${marker}`;
+}
+
+function splitLines(text: string): string[] {
+  return text.replace(/\r\n/g, '\n').split('\n');
+}
+
+function findLastIndex<T>(items: T[], predicate: (item: T, index: number) => boolean): number {
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (predicate(items[i], i)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function findAnchorStart(afterLines: string[], anchorLines: string[], maxIndex: number): number {
+  if (anchorLines.length === 0) {
+    return -1;
+  }
+
+  const maxStart = Math.min(maxIndex - anchorLines.length, afterLines.length - anchorLines.length);
+  for (let start = maxStart; start >= 0; start--) {
+    let match = true;
+    for (let offset = 0; offset < anchorLines.length; offset++) {
+      if (afterLines[start + offset] !== anchorLines[offset]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      return start;
+    }
+  }
+
+  return -1;
+}
+
+function extractOutputFromCapture(before: string, after: string, marker: string): string {
+  const beforeLines = splitLines(before);
+  const afterLines = splitLines(after);
+  const markerIndex = findLastIndex(afterLines, line => line.includes(marker));
+
+  if (markerIndex === -1) {
+    return '';
+  }
+
+  let startIndex = 0;
+  const anchorSize = Math.min(DEFAULT_MARKER_ANCHOR_LINES, beforeLines.length);
+  const anchorLines = beforeLines.slice(-anchorSize);
+  const anchorStart = findAnchorStart(afterLines, anchorLines, markerIndex);
+
+  if (anchorStart >= 0) {
+    startIndex = anchorStart + anchorLines.length;
+  } else {
+    const lastNonEmpty = findLastIndex(beforeLines, line => line.trim().length > 0);
+    if (lastNonEmpty >= 0) {
+      const fallbackLine = beforeLines[lastNonEmpty];
+      const fallbackIndex = findLastIndex(afterLines.slice(0, markerIndex), line => line === fallbackLine);
+      if (fallbackIndex >= 0) {
+        startIndex = fallbackIndex + 1;
+      }
+    }
+  }
+
+  const outputLines = afterLines.slice(startIndex, markerIndex);
+  return outputLines.join('\n').trim();
+}
+
+async function waitForMarker(
+  session: string,
+  marker: string,
+  beforeCapture: string,
+  captureLines: number,
+  pollMs: number,
+  timeoutMs?: number
+): Promise<string> {
+  const startTime = Date.now();
+
+  while (true) {
+    const afterCapture = tmuxCapturePane(session, captureLines);
+    if (afterCapture.includes(marker)) {
+      return extractOutputFromCapture(beforeCapture, afterCapture, marker);
+    }
+
+    if (timeoutMs && Date.now() - startTime >= timeoutMs) {
+      console.log(colors.warning(`⚠️  Marker wait timed out after ${timeoutMs}ms`));
+      return '';
+    }
+
+    await sleep(pollMs);
+  }
+}
+
+function normalizePromptData(promptText: string, fallback: PromptData): PromptData {
+  return {
+    prompt: promptText,
+    tmux_session: fallback.tmux_session,
+    sent: "false",
+    sent_timestamp: null,
+    default_wait: fallback.default_wait || '0m'
+  };
+}
+
+function normalizePromptJson(raw: Partial<PromptData>, fallback: PromptData): PromptData | null {
+  if (!raw.prompt) {
+    return null;
+  }
+
+  return {
+    prompt: raw.prompt,
+    tmux_session: raw.tmux_session || fallback.tmux_session,
+    sent: "false",
+    sent_timestamp: null,
+    default_wait: raw.default_wait || fallback.default_wait || '0m'
+  };
+}
+
+function parsePostProcessOutput(output: string, fallback: PromptData): PromptData[] {
+  const trimmed = output.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const lines = trimmed.split('\n').filter(line => line.trim().length > 0);
+  const parsedLines: PromptData[] = [];
+
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line) as Partial<PromptData>;
+      const normalized = normalizePromptJson(parsed, fallback);
+      if (!normalized) {
+        return [normalizePromptData(trimmed, fallback)];
+      }
+      parsedLines.push(normalized);
+    } catch {
+      return [normalizePromptData(trimmed, fallback)];
+    }
+  }
+
+  return parsedLines;
+}
+
+function appendPrompts(promptFile: string, prompts: PromptData[]): void {
+  if (prompts.length === 0) {
+    return;
+  }
+
+  const existingContent = readFileSync(promptFile, 'utf8');
+  const needsNewline = existingContent.length > 0 && !existingContent.endsWith('\n');
+  const serialized = prompts.map(prompt => JSON.stringify(prompt)).join('\n');
+  appendFileSync(promptFile, `${needsNewline ? '\n' : ''}${serialized}`);
+}
+
+function runPostProcess(cmd: string, payload: { prompt: string; output: string; taskIndex: number }): string {
+  try {
+    return execSync(cmd, { input: JSON.stringify(payload) }).toString();
+  } catch (error) {
+    const err = error as { message?: string; stderr?: Buffer };
+    const stderr = err.stderr ? err.stderr.toString().trim() : '';
+    const message = stderr || err.message || 'Unknown error';
+    console.log(colors.error(`❌ Post-process command failed: ${message}`));
+    return '';
+  }
+}
+
+interface ExecutionContext {
+  mode: 'repeat' | 'sequential';
+  ignoreApproachingLimit: boolean;
+  captureLines: number;
+  enableMarker: boolean;
+  markerPrefix: string;
+  markerRunId: string;
+  waitForMarker: boolean;
+  postProcessCmd?: string;
+  markerPollMs: number;
+  markerTimeoutMs?: number;
+}
+
+async function executePromptWithHooks(
+  promptData: PromptData,
+  promptFile: string,
+  ctx: ExecutionContext,
+  skipUsageLimitCheck: boolean,
+  taskIndex: number
+): Promise<void> {
+  const marker = ctx.enableMarker ? buildTaskMarker(taskIndex, ctx.markerPrefix, ctx.markerRunId) : '';
+  const preparedPrompt = marker ? wrapPromptWithMarker(promptData.prompt, marker) : promptData.prompt;
+  const promptToSend = { ...promptData, prompt: preparedPrompt };
+
+  const needsOutput = ctx.waitForMarker || Boolean(ctx.postProcessCmd);
+  const captureBefore = needsOutput && marker
+    ? () => tmuxCapturePane(promptData.tmux_session, ctx.captureLines)
+    : undefined;
+
+  const beforeCapture = await executePrompt(
+    promptToSend,
+    promptData.tmux_session,
+    skipUsageLimitCheck,
+    ctx.ignoreApproachingLimit,
+    ctx.mode,
+    ctx.captureLines,
+    captureBefore
+  );
+
+  let output = '';
+  if (needsOutput && marker) {
+    console.log(colors.info(`⏳ Waiting for completion marker ${marker}...`));
+    output = await waitForMarker(
+      promptData.tmux_session,
+      marker,
+      beforeCapture,
+      ctx.captureLines,
+      ctx.markerPollMs,
+      ctx.markerTimeoutMs
+    );
+  }
+
+  if (ctx.postProcessCmd) {
+    const postOutput = runPostProcess(ctx.postProcessCmd, {
+      prompt: promptData.prompt,
+      output,
+      taskIndex
+    });
+    const newPrompts = parsePostProcessOutput(postOutput, promptData);
+    if (newPrompts.length > 0) {
+      appendPrompts(promptFile, newPrompts);
+      console.log(colors.success(`🧩 Appended ${newPrompts.length} prompt(s) from post-process hook`));
+    }
+  }
+}
+
 function parseArgs(): { command: string; options: ScheduleOptions } {
   const args = process.argv.slice(2);
   const command = args[0] || 'help';
@@ -246,6 +504,28 @@ function parseArgs(): { command: string; options: ScheduleOptions } {
       i++; // Skip next arg
     } else if (args[i] === '--prompt-file' && args[i + 1]) {
       options.promptFile = args[i + 1];
+      i++; // Skip next arg
+    } else if (args[i] === '--post-process-cmd' && args[i + 1]) {
+      options.postProcessCmd = args[i + 1];
+      i++; // Skip next arg
+    } else if (args[i] === '--task-marker') {
+      const nextArg = args[i + 1];
+      if (nextArg && !nextArg.startsWith('--')) {
+        options.taskMarkerPrefix = nextArg;
+        i++; // Skip next arg
+      } else {
+        options.taskMarkerPrefix = DEFAULT_MARKER_PREFIX;
+      }
+    } else if (args[i] === '--wait-for-marker') {
+      options.waitForMarker = true;
+    } else if (args[i] === '--capture-lines' && args[i + 1]) {
+      options.captureLines = parseInt(args[i + 1]);
+      i++; // Skip next arg
+    } else if (args[i] === '--marker-poll-ms' && args[i + 1]) {
+      options.markerPollMs = parseInt(args[i + 1]);
+      i++; // Skip next arg
+    } else if (args[i] === '--marker-timeout-ms' && args[i + 1]) {
+      options.markerTimeoutMs = parseInt(args[i + 1]);
       i++; // Skip next arg
     } else if (args[i] === '--ignore-approaching-limit') {
       options.ignoreApproachingLimit = true;
@@ -346,9 +626,16 @@ function getPromptByIndex(index: number, promptFile: string = PROMPTS_FILE): Pro
   return { prompt: prompts[index - 1], index: index - 1 };
 }
 
-async function executePromptSequential(promptData: PromptData, session: string, skipUsageLimitCheck: boolean = false, ignoreApproaching: boolean = false): Promise<void> {
+async function executePromptSequential(
+  promptData: PromptData,
+  session: string,
+  skipUsageLimitCheck: boolean = false,
+  ignoreApproaching: boolean = false,
+  captureLines: number = DEFAULT_CAPTURE_LINES,
+  captureBefore?: () => string
+): Promise<string> {
   // Check for usage limit before executing (skip for initial/single executions)
-  const usageLimitDetected = await checkUsageLimit(session, skipUsageLimitCheck, ignoreApproaching);
+  const usageLimitDetected = await checkUsageLimit(session, skipUsageLimitCheck, ignoreApproaching, captureLines);
   if (usageLimitDetected) {
     console.log(colors.success('✅ Usage limit wait completed, continuing with prompt execution...'));
   }
@@ -361,6 +648,8 @@ async function executePromptSequential(promptData: PromptData, session: string, 
   
   await sleep(1000);
   
+  const beforeCapture = captureBefore ? captureBefore() : '';
+
   // Load prompt data directly to buffer and paste
   tmuxLoadBufferFromData(promptData.prompt);
   tmuxPasteBuffer(session);
@@ -369,11 +658,20 @@ async function executePromptSequential(promptData: PromptData, session: string, 
   
   // Send Enter
   tmuxSendKeys(session, 'Enter');
+
+  return beforeCapture;
 }
 
-async function executePromptRepeat(promptData: PromptData, session: string, skipUsageLimitCheck: boolean = false, ignoreApproaching: boolean = false): Promise<void> {
+async function executePromptRepeat(
+  promptData: PromptData,
+  session: string,
+  skipUsageLimitCheck: boolean = false,
+  ignoreApproaching: boolean = false,
+  captureLines: number = DEFAULT_CAPTURE_LINES,
+  captureBefore?: () => string
+): Promise<string> {
   // Check for usage limit before executing (skip for initial/single executions)
-  const usageLimitDetected = await checkUsageLimit(session, skipUsageLimitCheck, ignoreApproaching);
+  const usageLimitDetected = await checkUsageLimit(session, skipUsageLimitCheck, ignoreApproaching, captureLines);
   if (usageLimitDetected) {
     console.log(colors.success('✅ Usage limit wait completed, continuing with prompt execution...'));
   }
@@ -404,6 +702,8 @@ async function executePromptRepeat(promptData: PromptData, session: string, skip
   tmuxSendKeys(session, 'C-c');
   
   await sleep(1000);
+
+  const beforeCapture = captureBefore ? captureBefore() : '';
   
   // Load prompt data directly to buffer and paste
   tmuxLoadBufferFromData(promptData.prompt);
@@ -413,20 +713,54 @@ async function executePromptRepeat(promptData: PromptData, session: string, skip
   
   // Send Enter
   tmuxSendKeys(session, 'Enter');
+
+  return beforeCapture;
 }
 
-async function executePrompt(promptData: PromptData, session: string, skipUsageLimitCheck: boolean = false, ignoreApproaching: boolean = false, mode: 'repeat' | 'sequential' = 'repeat'): Promise<void> {
+async function executePrompt(
+  promptData: PromptData,
+  session: string,
+  skipUsageLimitCheck: boolean = false,
+  ignoreApproaching: boolean = false,
+  mode: 'repeat' | 'sequential' = 'repeat',
+  captureLines: number = DEFAULT_CAPTURE_LINES,
+  captureBefore?: () => string
+): Promise<string> {
   if (mode === 'sequential') {
-    await executePromptSequential(promptData, session, skipUsageLimitCheck, ignoreApproaching);
-  } else {
-    await executePromptRepeat(promptData, session, skipUsageLimitCheck, ignoreApproaching);
+    return executePromptSequential(promptData, session, skipUsageLimitCheck, ignoreApproaching, captureLines, captureBefore);
   }
+  return executePromptRepeat(promptData, session, skipUsageLimitCheck, ignoreApproaching, captureLines, captureBefore);
 }
 
 async function main(): Promise<void> {
   const { command, options } = parseArgs();
   const promptFile = resolve(options.promptFile || PROMPTS_FILE);
   const mode = options.mode || 'repeat';
+  const captureLines = Number.isFinite(options.captureLines) && (options.captureLines as number) > 0
+    ? (options.captureLines as number)
+    : DEFAULT_CAPTURE_LINES;
+  const markerPollMs = Number.isFinite(options.markerPollMs) && (options.markerPollMs as number) > 0
+    ? (options.markerPollMs as number)
+    : DEFAULT_MARKER_POLL_MS;
+  const markerTimeoutMs = Number.isFinite(options.markerTimeoutMs) && (options.markerTimeoutMs as number) > 0
+    ? options.markerTimeoutMs
+    : undefined;
+  const waitForMarker = options.waitForMarker || Boolean(options.postProcessCmd);
+  const enableMarker = Boolean(options.taskMarkerPrefix || waitForMarker);
+  const markerPrefix = options.taskMarkerPrefix || DEFAULT_MARKER_PREFIX;
+  const markerRunId = enableMarker ? dayjs().format('YYMMDDHHmmss') : '';
+  const executionContext: ExecutionContext = {
+    mode,
+    ignoreApproachingLimit: options.ignoreApproachingLimit || false,
+    captureLines,
+    enableMarker,
+    markerPrefix,
+    markerRunId,
+    waitForMarker,
+    postProcessCmd: options.postProcessCmd,
+    markerPollMs,
+    markerTimeoutMs
+  };
   
   if (!command || command === 'help') {
     showHelp();
@@ -440,6 +774,15 @@ async function main(): Promise<void> {
     
     console.log(colors.info(`📄 Using prompt file: ${promptFile}`));
     console.log(colors.info(`🔄 Execution mode: ${mode}`));
+    if (executionContext.enableMarker) {
+      const markerLabel = executionContext.markerRunId
+        ? `${executionContext.markerPrefix}:${executionContext.markerRunId}-###`
+        : `${executionContext.markerPrefix}:###`;
+      console.log(colors.info(`🏁 Completion marker: [${markerLabel}]`));
+    }
+    if (executionContext.postProcessCmd) {
+      console.log(colors.info(`🧩 Post-process hook: ${executionContext.postProcessCmd}`));
+    }
     if (options.stopAtTime) {
       const stopTime = parseStopTime(options.stopAtTime);
       console.log(colors.info(`⏰ Will stop at ${options.stopAtTime} (${stopTime?.format('YYYY-MM-DD HH:mm:ss')})`));
@@ -449,30 +792,34 @@ async function main(): Promise<void> {
       console.log(colors.info(`⏰ Will stop after ${options.stopAfterHours} hours (${endTime.format('YYYY-MM-DD HH:mm:ss')})`));
     }
     
-    const prompts = loadPrompts(promptFile);
     let executed = 0;
     let isFirstExecution = true;
+    let taskIndex = 0;
     
-    for (let i = 0; i < prompts.length; i++) {
-      const prompt = prompts[i];
+    while (true) {
+      const nextPrompt = getNextPrompt(promptFile);
       
       // Check time limits before each prompt
       if (shouldStop(startTime, options)) {
         break;
       }
       
-      // Skip if already sent
-      if (prompt.sent === "true") {
-        console.log(colors.muted(`⏭️  Skipping prompt ${i + 1}: already sent`));
-        continue;
+      if (!nextPrompt) {
+        if (executed === 0) {
+          console.log(colors.warning('⚠️  No unsent prompts found'));
+        }
+        break;
       }
-      
-      console.log(colors.primary(`\n🎯 Executing prompt ${i + 1}:`), colors.accent(prompt.prompt));
+
+      const { prompt, index } = nextPrompt;
+      taskIndex += 1;
+
+      console.log(colors.primary(`\n🎯 Executing prompt ${index + 1}:`), colors.accent(prompt.prompt));
       // Skip usage limit check for first execution, enable for subsequent ones
-      await executePrompt(prompt, prompt.tmux_session, isFirstExecution, options.ignoreApproachingLimit || false, mode);
-      updatePromptStatus(i, true, Date.now(), promptFile);
+      await executePromptWithHooks(prompt, promptFile, executionContext, isFirstExecution, taskIndex);
+      updatePromptStatus(index, true, Date.now(), promptFile);
       executed++;
-      console.log(colors.success(`✅ Prompt ${i + 1} completed`));
+      console.log(colors.success(`✅ Prompt ${index + 1} completed`));
       
       // After first execution, enable usage limit checking for subsequent prompts
       isFirstExecution = false;
@@ -501,9 +848,10 @@ async function main(): Promise<void> {
       return;
     }
     
+    const taskIndex = nextPrompt.index + 1;
     console.log(colors.primary(`🎯 Executing next prompt:`), colors.accent(nextPrompt.prompt.prompt));
     // Skip usage limit check for single 'next' execution (initial execution)
-    await executePrompt(nextPrompt.prompt, nextPrompt.prompt.tmux_session, true, options.ignoreApproachingLimit || false, mode);
+    await executePromptWithHooks(nextPrompt.prompt, promptFile, executionContext, true, taskIndex);
     updatePromptStatus(nextPrompt.index, true, Date.now(), promptFile);
     console.log(colors.success('✅ Prompt completed'));
     
@@ -539,7 +887,7 @@ async function main(): Promise<void> {
     
     console.log(colors.primary(`🎯 Executing prompt ${promptIndex}:`), colors.accent(prompt.prompt));
     // Skip usage limit check for single index execution (initial execution)
-    await executePrompt(prompt, prompt.tmux_session, true, options.ignoreApproachingLimit || false, mode);
+    await executePromptWithHooks(prompt, promptFile, executionContext, true, promptIndex);
     updatePromptStatus(index, true, Date.now(), promptFile);
     console.log(colors.success('✅ Prompt completed'));
   }
