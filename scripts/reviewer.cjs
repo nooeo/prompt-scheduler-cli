@@ -7,7 +7,7 @@ const { URL } = require('url');
 
 const DEFAULT_BASE_URL = 'http://175.178.33.108:3001';
 const DEFAULT_MODEL = 'gemini-3-pro';
-const DEFAULT_SYSTEM_PROMPT = '你现在写一段话指导 AI 继续完成';
+const DEFAULT_SYSTEM_PROMPT = '你现在写一段话指导 AI 继续完成。如果你认为 Claude Code 已经充分完成任务，请只输出一行：[PS_TASK_STOP]。否则只输出下一条要发给 Claude Code 的指令，不要输出多余解释。';
 
 function readStdin() {
   return new Promise((resolve, reject) => {

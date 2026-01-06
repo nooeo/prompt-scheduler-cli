@@ -131,6 +131,7 @@ Hook 可以输出：
 ## 🤖 Gemini Reviewer 示例
 
 内置脚本：`scripts/reviewer.cjs`，会把 Claude Code 的输出发给 `gemini-3-pro`。
+默认 system prompt 会要求 reviewer 在任务完成时只输出一行 `[PS_TASK_STOP]`，否则只返回下一条指令。
 
 ```bash
 export PS_REVIEWER_API_KEY="your-api-key"
