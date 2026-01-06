@@ -209,6 +209,17 @@ The hook can return either plain text (treated as a single new prompt) or JSONL 
 `--post-process-cmd` automatically enables marker waiting even if `--wait-for-marker` is not specified.
 Use `--capture-lines` to adjust how much tmux history is scanned (default: 2000).
 
+### Gemini Reviewer Example
+
+The included `scripts/reviewer.js` posts the Claude Code output to a Gemini-compatible endpoint and returns the next instruction.
+
+```bash
+export PS_REVIEWER_API_KEY="your-api-key"
+export PS_REVIEWER_API_URL="http://175.178.33.108:3001"
+export PS_REVIEWER_MODEL="gemini-3-pro"
+tsx src/claude-schedule.ts run --task-marker --wait-for-marker --post-process-cmd "node scripts/reviewer.js"
+```
+
 ## 💡 Usage Limit Handling
 
 The scheduler automatically detects Claude usage limit message formats:
