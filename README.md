@@ -1,6 +1,11 @@
-# 🚀 Prompt Scheduler
+**Prompt Scheduler Loop Agent** 是对 Prompt Scheduler 的闭环增强：它可以把任务发送给 tmux 中运行的 Claude Code，等待可判定的完成信号（Done Marker），抽取该轮输出结果，然后调用一个可插拔的“评审/规划”大模型（通过外部 hook 命令）生成下一步处理意见，并自动回写给 Claude Code，形成 P2–P6 的自迭代工作流。
 
-> 基于 tmux 的 Claude Code 自动化调度器，支持完成标记、结果抽取与后处理 hook。
+**核心特性：**
+
+- 结果驱动的完成判定（marker），替代盲等
+- 从 tmux 历史中抽取本轮输出并落盘可追溯
+- 外部 hook 接入任意大模型/规则引擎（供应商无关）
+- 超时/轮数/错误护栏，避免无限循环与成本失控
 
 English README: [README.en.md](README.en.md)
 
