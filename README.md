@@ -2,6 +2,8 @@
 
 > 基于 tmux 的 Claude Code 自动化调度器，支持完成标记、结果抽取与后处理 hook。
 
+English README: [README.en.md](README.en.md)
+
 ## 🎯 工作流理念（P1–P6）
 
 - **P1（人工目标/计划）价值最高**：你负责目标设定与关键评审。
